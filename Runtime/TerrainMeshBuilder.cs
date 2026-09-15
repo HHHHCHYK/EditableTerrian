@@ -26,13 +26,14 @@ namespace Humanier.Terrain
             int capacity = math.max(16, cells * cells * cells * 12 + (data.Resolution / (stride * 2)) * (data.Resolution / (stride * 2)) * 12 * FaceCount(faces));
             var vertices = new NativeList<float3>(capacity, Allocator.TempJob);
             var colors = new NativeList<Color32>(capacity, Allocator.TempJob);
+            var normals = new NativeList<float3>(capacity, Allocator.TempJob);
             var indices = new NativeList<int>(capacity * 3, Allocator.TempJob);
             var job = new TerrainMeshingJob { density = density, materials = materials,
                 regularVertexCount = tables.regularVertexCount, regularTriangleIndexCount = tables.regularTriangleIndexCount, regularVertices = tables.regularVertices, regularIndices = tables.regularIndices,
                 transitionVertexCount = tables.transitionVertexCount, transitionTriangleIndexCount = tables.transitionTriangleIndexCount, transitionVertices = tables.transitionVertices, transitionIndices = tables.transitionIndices, transitionFlip = tables.transitionFlip,
-                vertices = vertices, colors = colors, indices = indices,
+                vertices = vertices, colors = colors, normals = normals, indices = indices,
                 resolution = data.Resolution, stride = stride, voxelSize = data.VoxelSize, offset = new float3(data.Id.x * data.Resolution * data.VoxelSize, data.Id.y * data.Resolution * data.VoxelSize, data.Id.z * data.Resolution * data.VoxelSize) - (float3)origin, faces = faces };
-            return new TerrainMeshBuildRequest(data.Version, job.Schedule(), density, materials, tables, vertices, colors, indices);
+            return new TerrainMeshBuildRequest(data.Version, job.Schedule(), density, materials, tables, vertices, colors, normals, indices);
         }
 
         internal static Mesh Build(TerrainChunkData data, Vector3 origin, int lod) => Build(data, origin, lod, TransitionFaceMask.None);
@@ -43,22 +44,22 @@ namespace Humanier.Terrain
     internal sealed class TerrainMeshBuildRequest : IDisposable
     {
         private JobHandle handle; private NativeArray<float> density; private NativeArray<byte> materials; private TransvoxelTableSnapshot tables;
-        private NativeList<float3> vertices; private NativeList<Color32> colors; private NativeList<int> indices; private bool disposed;
+        private NativeList<float3> vertices; private NativeList<Color32> colors; private NativeList<float3> normals; private NativeList<int> indices; private bool disposed;
         internal int Version { get; } internal bool IsCompleted => handle.IsCompleted;
-        internal TerrainMeshBuildRequest(int version, JobHandle handle, NativeArray<float> density, NativeArray<byte> materials, TransvoxelTableSnapshot tables, NativeList<float3> vertices, NativeList<Color32> colors, NativeList<int> indices)
-        { Version = version; this.handle = handle; this.density = density; this.materials = materials; this.tables = tables; this.vertices = vertices; this.colors = colors; this.indices = indices; }
+        internal TerrainMeshBuildRequest(int version, JobHandle handle, NativeArray<float> density, NativeArray<byte> materials, TransvoxelTableSnapshot tables, NativeList<float3> vertices, NativeList<Color32> colors, NativeList<float3> normals, NativeList<int> indices)
+        { Version = version; this.handle = handle; this.density = density; this.materials = materials; this.tables = tables; this.vertices = vertices; this.colors = colors; this.normals = normals; this.indices = indices; }
         internal Mesh Complete()
         {
             if (disposed) throw new ObjectDisposedException(nameof(TerrainMeshBuildRequest));
             handle.Complete(); if (vertices.Length == 0) return null;
             var mesh = new Mesh { indexFormat = vertices.Length > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16 };
-            var output = new Vector3[vertices.Length]; for (int i = 0; i < output.Length; i++) output[i] = vertices[i];
-            mesh.vertices = output; mesh.SetColors(colors.AsArray()); mesh.SetIndices(indices.AsArray(), MeshTopology.Triangles, 0, true); mesh.RecalculateNormals(); mesh.RecalculateBounds(); return mesh;
+            var output = new Vector3[vertices.Length]; var outputNormals = new Vector3[normals.Length]; for (int i = 0; i < output.Length; i++) { output[i] = vertices[i]; outputNormals[i] = normals[i]; }
+            mesh.vertices = output; mesh.normals = outputNormals; mesh.SetColors(colors.AsArray()); mesh.SetIndices(indices.AsArray(), MeshTopology.Triangles, 0, true); mesh.RecalculateBounds(); return mesh;
         }
         public void Dispose()
         {
             if (disposed) return; handle.Complete(); if (density.IsCreated) density.Dispose(); if (materials.IsCreated) materials.Dispose(); tables.Dispose();
-            if (vertices.IsCreated) vertices.Dispose(); if (colors.IsCreated) colors.Dispose(); if (indices.IsCreated) indices.Dispose(); disposed = true;
+            if (vertices.IsCreated) vertices.Dispose(); if (colors.IsCreated) colors.Dispose(); if (normals.IsCreated) normals.Dispose(); if (indices.IsCreated) indices.Dispose(); disposed = true;
         }
     }
 
@@ -70,7 +71,7 @@ namespace Humanier.Terrain
         [ReadOnly] internal NativeArray<ushort> regularVertices;
         [ReadOnly] internal NativeArray<byte> transitionVertexCount, transitionTriangleIndexCount, transitionIndices, transitionFlip;
         [ReadOnly] internal NativeArray<ushort> transitionVertices;
-        internal NativeList<float3> vertices; internal NativeList<Color32> colors; internal NativeList<int> indices;
+        internal NativeList<float3> vertices; internal NativeList<Color32> colors; internal NativeList<float3> normals; internal NativeList<int> indices;
         internal int resolution, stride; internal float voxelSize; internal float3 offset; internal TransitionFaceMask faces;
         public void Execute()
         {
@@ -83,7 +84,7 @@ namespace Humanier.Terrain
         {
             int code = 0; for (int i = 0; i < 8; i++) if (D(x + ((i & 1) * stride), y + (((i >> 2) & 1) * stride), z + (((i >> 1) & 1) * stride)) > 0f) code |= 1 << i;
             int count = regularVertexCount[code]; if (count == 0) return; int start = vertices.Length;
-            for (int i = 0; i < count; i++) { ushort edge = regularVertices[code * 12 + i]; int a = (edge >> 4) & 15, b = edge & 15; float da = CornerD(x,y,z,a), db = CornerD(x,y,z,b); float3 p = math.lerp(CornerP(x,y,z,a), CornerP(x,y,z,b), math.clamp(da / (da - db), 0f, 1f)); vertices.Add(p); colors.Add(C(p)); }
+            for (int i = 0; i < count; i++) { ushort edge = regularVertices[code * 12 + i]; int a = (edge >> 4) & 15, b = edge & 15; float da = CornerD(x,y,z,a), db = CornerD(x,y,z,b); float3 p = math.lerp(CornerP(x,y,z,a), CornerP(x,y,z,b), math.clamp(da / (da - db), 0f, 1f)); vertices.Add(p); colors.Add(C(p)); normals.Add(OutwardNormal(p)); }
             for (int i = 0, n = regularTriangleIndexCount[code]; i < n; i += 3) AddOriented(start + regularIndices[code * 36 + i], start + regularIndices[code * 36 + i + 1], start + regularIndices[code * 36 + i + 2]);
         }
         // Transvoxel's 13-point cell joins a two-by-two fine face patch to its coarser representation.
@@ -94,7 +95,7 @@ namespace Humanier.Terrain
             {
                 float d0=FD(face,u,v), d1=FD(face,u+stride,v), d2=FD(face,u+span,v), d3=FD(face,u,v+stride), d4=FD(face,u+stride,v+stride), d5=FD(face,u+span,v+stride), d6=FD(face,u,v+span), d7=FD(face,u+stride,v+span), d8=FD(face,u+span,v+span);
                 int code=(d0>0?1:0)|(d1>0?2:0)|(d2>0?4:0)|(d5>0?8:0)|(d8>0?16:0)|(d7>0?32:0)|(d6>0?64:0)|(d3>0?128:0)|(d4>0?256:0), count=transitionVertexCount[code]; if(count==0) continue; int start=vertices.Length;
-                for(int i=0;i<count;i++){ushort edge=transitionVertices[code*12+i];int a=(edge>>4)&15,b=edge&15;float da=TD(a,d0,d1,d2,d3,d4,d5,d6,d7,d8),db=TD(b,d0,d1,d2,d3,d4,d5,d6,d7,d8);float3 p=math.lerp(TP(face,u,v,a),TP(face,u,v,b),math.clamp(da/(da-db),0f,1f));vertices.Add(p);colors.Add(C(p));}
+                for(int i=0;i<count;i++){ushort edge=transitionVertices[code*12+i];int a=(edge>>4)&15,b=edge&15;float da=TD(a,d0,d1,d2,d3,d4,d5,d6,d7,d8),db=TD(b,d0,d1,d2,d3,d4,d5,d6,d7,d8);float3 p=math.lerp(TP(face,u,v,a),TP(face,u,v,b),math.clamp(da/(da-db),0f,1f));vertices.Add(p);colors.Add(C(p));normals.Add(OutwardNormal(p));}
                 bool flip=transitionFlip[code] != 0; for(int i=0,n=transitionTriangleIndexCount[code];i<n;i+=3){int a=start+transitionIndices[code*36+i],b=start+transitionIndices[code*36+i+1],c=start+transitionIndices[code*36+i+2];AddOriented(a,flip?c:b,flip?b:c);}
             }
         }
