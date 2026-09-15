@@ -11,6 +11,8 @@ namespace Humanier.Terrain
         [Range(8, 64)] public int chunkResolution = 32;
         [Min(16f)] public float viewDistance = 256f;
         [Min(1)] public int chunksBuiltPerFrame = 2;
+        [Min(16)] public int maxQueuedChunks = 1024;
+        [Min(1)] public int maxQueuedEdits = 64;
         [Tooltip("Distance in metres at which each coarser mesh level begins.")]
         public float[] lodDistances = { 64f, 128f, 256f };
         [Header("Protection")]

@@ -2,6 +2,7 @@ using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
 using System.Collections;
+using System.IO;
 
 namespace Humanier.Terrain.Tests
 {
@@ -54,6 +55,17 @@ namespace Humanier.Terrain.Tests
             Assert.AreEqual(-3f, restored.Density[0]);
             var newSession = new TerrainSessionCache(settings.seed, System.Guid.NewGuid().ToString("N"));
             Assert.IsFalse(newSession.TryLoad(new TerrainChunkData(settings, id)));
+        }
+        [Test]
+        public void CorruptSessionCacheReportsAnError()
+        {
+            string session = System.Guid.NewGuid().ToString("N");
+            string directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain", settings.seed.ToString(), session);
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "0_0_0.bin"), "not a gzip terrain cache");
+            var cache = new TerrainSessionCache(settings.seed, session);
+            Assert.IsFalse(cache.TryLoad(new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0))));
+            Assert.IsNotEmpty(cache.LastError);
         }
     }
 }

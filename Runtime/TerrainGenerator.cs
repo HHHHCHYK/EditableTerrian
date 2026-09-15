@@ -56,12 +56,13 @@ namespace Humanier.Terrain
             {
                 noise = new FastNoiseLite(seed);
                 noise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2S);
+                noise.SetFrequency(1f);
                 noise.SetFractalType(FastNoiseLite.FractalType.FBm);
                 noise.SetFractalOctaves(octaves);
                 Noises.Add(key, noise);
             }
             return (noise.GetNoise(x, z) + 1f) * .5f;
         }
-        private static float Smooth01(float t) => t * t * (3f - 2f * t);
+        private static float Smooth01(float t) { t = Mathf.Clamp01(t); return t * t * (3f - 2f * t); }
     }
 }

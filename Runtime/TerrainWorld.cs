@@ -17,6 +17,7 @@ namespace Humanier.Terrain
         private readonly Queue<TerrainChunkId> requestedChunks = new Queue<TerrainChunkId>();
         private readonly HashSet<TerrainChunkId> queuedChunks = new HashSet<TerrainChunkId>();
         private readonly Queue<PendingEdit> editQueue = new Queue<PendingEdit>();
+        private readonly List<ChunkPriority> streamingPlan = new List<ChunkPriority>();
         private TerrainSessionCache cache;
         private TerrainWorldSettings generatedSettings;
         private Material generatedMaterial;
@@ -24,6 +25,9 @@ namespace Humanier.Terrain
         private bool cacheWriteBlocked;
         private bool processingEdit;
         private int frameCounter;
+        private TerrainChunkId plannedFocusChunk;
+        private int streamingPlanIndex;
+        private bool hasStreamingPlan;
 
         public TerrainWorldSettings Settings => settings != null ? settings : generatedSettings;
         public Vector3 OriginOffset => originOffset;
@@ -45,6 +49,11 @@ namespace Humanier.Terrain
             public TerrainEditRequest request;
             public TerrainEditHandle handle;
         }
+        private struct ChunkPriority
+        {
+            public TerrainChunkId id;
+            public float distanceSquared;
+        }
 
         private void Awake()
         {
@@ -65,12 +74,16 @@ namespace Humanier.Terrain
         private void Update()
         {
             ApplyCompletedMeshes();
-            if (focus != null && !cacheWriteBlocked) QueueChunksNear(focus.position + originOffset);
+            if (focus != null && !cacheWriteBlocked) UpdateStreamingPlan(focus.position + originOffset);
             int buildCount = Settings.chunksBuiltPerFrame;
             while (buildCount-- > 0 && requestedChunks.Count > 0)
             {
                 TerrainChunkId id = requestedChunks.Dequeue(); queuedChunks.Remove(id);
-                if (!chunks.ContainsKey(id)) CreateChunk(id);
+                if (!chunks.ContainsKey(id) && !CreateChunk(id, focus == null ? Vector3.zero : focus.position + originOffset))
+                {
+                    QueueChunk(id);
+                    break;
+                }
             }
             if (++frameCounter % 30 == 0 && focus != null) UpdateLodsAndEvict(focus.position + originOffset);
         }
@@ -126,7 +139,12 @@ namespace Humanier.Terrain
         public TerrainEditHandle RequestEdit(TerrainEditRequest request)
         {
             var handle = new TerrainEditHandle();
-            if (request.radius <= 0f || request.radius > 64f) { handle.Status = TerrainEditStatus.Rejected; handle.Error = "Radius must be within 0.1 and 64 metres."; handle.Notify(); return handle; }
+            if (cacheWriteBlocked) { handle.Status = TerrainEditStatus.CacheFailure; handle.Error = "Terrain cache is unavailable; editing is paused to protect modified terrain."; handle.Notify(); return handle; }
+            if (!IsFinite(request.worldCenter) || !IsFinite(request.radius) || !IsFinite(request.strength) || !IsFinite(request.flattenHeight) || request.radius <= 0f || request.radius > 64f)
+            { handle.Status = TerrainEditStatus.Rejected; handle.Error = "Brush values must be finite and radius must be within 0.1 and 64 metres."; handle.Notify(); return handle; }
+            if (editQueue.Count >= Settings.maxQueuedEdits) { handle.Status = TerrainEditStatus.Rejected; handle.Error = "Terrain edit queue is full."; handle.Notify(); return handle; }
+            request.worldCenter += originOffset;
+            if (request.mode == TerrainBrushMode.Flatten) request.flattenHeight += originOffset.y;
             editQueue.Enqueue(new PendingEdit { request = request, handle = handle });
             if (!processingEdit) StartCoroutine(ProcessEdits());
             return handle;
@@ -137,6 +155,7 @@ namespace Humanier.Terrain
             processingEdit = true;
             while (editQueue.Count > 0)
             {
+                if (cacheWriteBlocked) { yield return null; continue; }
                 PendingEdit pending = editQueue.Dequeue();
                 yield return ApplyEdit(pending.request, pending.handle);
             }
@@ -146,7 +165,7 @@ namespace Humanier.Terrain
         private IEnumerator ApplyEdit(TerrainEditRequest request, TerrainEditHandle handle)
         {
             handle.Status = TerrainEditStatus.Processing; handle.Notify();
-            Vector3 globalCenter = request.worldCenter + originOffset;
+            Vector3 globalCenter = request.worldCenter;
             float size = Settings.ChunkSize;
             int minX = Mathf.FloorToInt((globalCenter.x - request.radius) / size), maxX = Mathf.FloorToInt((globalCenter.x + request.radius) / size);
             int minY = Mathf.FloorToInt((globalCenter.y - request.radius) / size), maxY = Mathf.FloorToInt((globalCenter.y + request.radius) / size);
@@ -157,7 +176,8 @@ namespace Humanier.Terrain
             request.worldCenter = globalCenter;
             for (int i = 0; i < candidates.Count; i++)
             {
-                LoadedChunk chunk = GetOrCreateChunk(candidates[i]);
+                LoadedChunk chunk = GetOrCreateChunk(candidates[i], globalCenter);
+                if (chunk == null) { handle.Status = TerrainEditStatus.CacheFailure; handle.Error = "Terrain cache is unavailable; edit was paused before data could be replaced."; handle.Notify(); yield break; }
                 if (chunk.data.Apply(Settings, request)) { RebuildChunk(chunk); changed++; }
                 handle.Progress = (i + 1f) / candidates.Count; handle.Notify();
                 if (i % 6 == 5) yield return null;
@@ -165,41 +185,60 @@ namespace Humanier.Terrain
             handle.Progress = 1f; handle.Status = TerrainEditStatus.Completed; handle.Notify();
         }
 
-        private void QueueChunksNear(Vector3 globalFocus)
+        private void UpdateStreamingPlan(Vector3 globalFocus)
         {
             TerrainChunkId center = WorldToChunk(globalFocus);
+            if (!hasStreamingPlan || !center.Equals(plannedFocusChunk))
+            {
+                plannedFocusChunk = center; hasStreamingPlan = true; streamingPlanIndex = 0; streamingPlan.Clear();
+                BuildStreamingPlan(center);
+            }
+            while (requestedChunks.Count < Settings.maxQueuedChunks && streamingPlanIndex < streamingPlan.Count)
+            {
+                QueueChunk(streamingPlan[streamingPlanIndex++].id);
+            }
+        }
+        private void BuildStreamingPlan(TerrainChunkId center)
+        {
             int horizontal = Mathf.CeilToInt(Settings.viewDistance / Settings.ChunkSize);
             int radiusSquared = horizontal * horizontal;
             for (int z = -horizontal; z <= horizontal; z++)
             for (int x = -horizontal; x <= horizontal; x++)
             {
                 if (x * x + z * z > radiusSquared) continue;
-                for (int y = -verticalChunksBelowFocus; y <= verticalChunksAboveFocus; y++) QueueChunk(new TerrainChunkId(center.x + x, center.y + y, center.z + z));
+                for (int y = -verticalChunksBelowFocus; y <= verticalChunksAboveFocus; y++)
+                {
+                    var id = new TerrainChunkId(center.x + x, center.y + y, center.z + z);
+                    if (!chunks.ContainsKey(id)) streamingPlan.Add(new ChunkPriority { id = id, distanceSquared = x * x + y * y + z * z });
+                }
             }
+            streamingPlan.Sort((a, b) => a.distanceSquared.CompareTo(b.distanceSquared));
         }
         private void QueueChunk(TerrainChunkId id)
         {
-            if (!chunks.ContainsKey(id) && queuedChunks.Add(id)) requestedChunks.Enqueue(id);
+            if (requestedChunks.Count < Settings.maxQueuedChunks && !chunks.ContainsKey(id) && queuedChunks.Add(id)) requestedChunks.Enqueue(id);
         }
-        private LoadedChunk GetOrCreateChunk(TerrainChunkId id)
+        private LoadedChunk GetOrCreateChunk(TerrainChunkId id, Vector3 priorityCenter)
         {
             if (chunks.TryGetValue(id, out LoadedChunk existing)) return existing;
-            CreateChunk(id); return chunks[id];
+            return CreateChunk(id, priorityCenter) ? chunks[id] : null;
         }
-        private void CreateChunk(TerrainChunkId id)
+        private bool CreateChunk(TerrainChunkId id, Vector3 priorityCenter)
         {
+            if (!EnsureDataCapacity(priorityCenter)) return false;
             var data = new TerrainChunkData(Settings, id);
             if (!cache.TryLoad(data) && !string.IsNullOrEmpty(cache.LastError))
             {
                 cacheWriteBlocked = true;
                 CacheWriteFailed?.Invoke($"Could not read terrain session cache: {cache.LastError}");
+                return false;
             }
             var go = new GameObject($"Terrain {id}"); go.transform.SetParent(transform, false);
             var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>(), lod = GetLod(id), lastAccessFrame = frameCounter };
             go.AddComponent<MeshRenderer>().sharedMaterial = Settings.terrainMaterial != null ? Settings.terrainMaterial : generatedMaterial;
             if (generateColliders) loaded.collider = go.AddComponent<MeshCollider>();
             go.AddComponent<TerrainChunkMarker>().Id = id;
-            chunks.Add(id, loaded); RebuildChunk(loaded);
+            chunks.Add(id, loaded); RebuildChunk(loaded); return true;
         }
         private void RebuildChunk(LoadedChunk chunk)
         {
@@ -288,6 +327,27 @@ namespace Humanier.Terrain
             return false;
         }
 
+        private bool EnsureDataCapacity(Vector3 priorityCenter)
+        {
+            long perChunk = (long)Settings.SampleResolution * Settings.SampleResolution * Settings.SampleResolution * (sizeof(float) + sizeof(byte));
+            long limit = Settings.memoryCacheLimitMb * 1024L * 1024L;
+            while ((chunks.Count + 1L) * perChunk > limit)
+            {
+                LoadedChunk candidate = null;
+                float furthest = float.MinValue;
+                foreach (LoadedChunk chunk in chunks.Values)
+                {
+                    TerrainChunkId id = chunk.data.Id;
+                    Vector3 position = new Vector3((id.x + .5f) * Settings.ChunkSize, (id.y + .5f) * Settings.ChunkSize, (id.z + .5f) * Settings.ChunkSize);
+                    float distance = (position - priorityCenter).sqrMagnitude;
+                    if (distance > furthest) { furthest = distance; candidate = chunk; }
+                }
+                if (candidate == null || !SaveBeforeUnload(candidate)) return false;
+                RemoveChunk(candidate.data.Id);
+            }
+            return true;
+        }
+
         private void RemoveChunk(TerrainChunkId id)
         {
             if (!chunks.TryGetValue(id, out LoadedChunk chunk)) return;
@@ -322,6 +382,9 @@ namespace Humanier.Terrain
         {
             if (chunks.TryGetValue(id, out LoadedChunk adjacent)) RebuildChunk(adjacent);
         }
+
+        private static bool IsFinite(Vector3 value) => IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+        private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
     }
 
     internal sealed class TerrainChunkMarker : MonoBehaviour
