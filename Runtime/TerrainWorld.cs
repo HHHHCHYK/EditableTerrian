@@ -18,6 +18,7 @@ namespace Humanier.Terrain
         private readonly HashSet<TerrainChunkId> queuedChunks = new HashSet<TerrainChunkId>();
         private TerrainSessionCache cache;
         private TerrainWorldSettings generatedSettings;
+        private Material generatedMaterial;
         private Vector3 originOffset;
         private bool cacheWriteBlocked;
         private int frameCounter;
@@ -45,6 +46,11 @@ namespace Humanier.Terrain
                 generatedSettings.name = "Runtime Terrain Settings";
             }
             cache = new TerrainSessionCache(Settings.seed);
+            if (Settings.terrainMaterial == null)
+            {
+                Shader shader = Shader.Find("Humanier/Terrain Low Poly");
+                if (shader != null) generatedMaterial = new Material(shader) { name = "Runtime Terrain Material" };
+            }
             if (focus == null && Camera.main != null) focus = Camera.main.transform;
         }
 
@@ -64,6 +70,7 @@ namespace Humanier.Terrain
         {
             foreach (LoadedChunk chunk in chunks.Values) if (chunk.filter != null && chunk.filter.sharedMesh != null) Destroy(chunk.filter.sharedMesh);
             if (generatedSettings != null) Destroy(generatedSettings);
+            if (generatedMaterial != null) Destroy(generatedMaterial);
         }
 
         public void SetFocus(Transform value) => focus = value;
@@ -149,7 +156,7 @@ namespace Humanier.Terrain
             var data = new TerrainChunkData(Settings, id); cache.TryLoad(data);
             var go = new GameObject($"Terrain {id}"); go.transform.SetParent(transform, false);
             var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>(), lod = GetLod(id), lastAccessFrame = frameCounter };
-            go.AddComponent<MeshRenderer>().sharedMaterial = Settings.terrainMaterial;
+            go.AddComponent<MeshRenderer>().sharedMaterial = Settings.terrainMaterial != null ? Settings.terrainMaterial : generatedMaterial;
             if (generateColliders) loaded.collider = go.AddComponent<MeshCollider>();
             chunks.Add(id, loaded); RebuildChunk(loaded);
         }

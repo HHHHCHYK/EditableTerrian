@@ -32,6 +32,7 @@ namespace Humanier.Terrain
         public Vector3 WorldPoint(int x, int y, int z) => new Vector3((Id.x * Resolution + x) * VoxelSize, (Id.y * Resolution + y) * VoxelSize, (Id.z * Resolution + z) * VoxelSize);
         public int Index(int x, int y, int z) => x + (Resolution + 1) * (y + (Resolution + 1) * z);
         public float GetDensity(int x, int y, int z) => Density[Index(x, y, z)];
+        public byte GetMaterial(int x, int y, int z) => Material[Index(x, y, z)];
         public void Restore(float[] density, byte[] material)
         {
             if (density == null || density.Length != Density.Length) return;

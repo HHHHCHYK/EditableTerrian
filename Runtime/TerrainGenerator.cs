@@ -1,9 +1,11 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Humanier.Terrain
 {
     public static class TerrainGenerator
     {
+        private static readonly Dictionary<int, FastNoiseLite> Noises = new Dictionary<int, FastNoiseLite>();
         public static TerrainBiome SampleBiome(int seed, float x, float z)
         {
             float climate = Fractal(seed + 17, x * 0.0018f, z * 0.0018f, 3);
@@ -49,35 +51,16 @@ namespace Humanier.Terrain
 
         private static float Fractal(int seed, float x, float z, int octaves)
         {
-            float total = 0f, amplitude = 1f, weight = 0f, frequency = 1f;
-            for (int i = 0; i < octaves; i++)
+            int key = seed * 10 + octaves;
+            if (!Noises.TryGetValue(key, out FastNoiseLite noise))
             {
-                total += ValueNoise(seed + i * 811, x * frequency, z * frequency) * amplitude;
-                weight += amplitude;
-                amplitude *= .5f;
-                frequency *= 2f;
+                noise = new FastNoiseLite(seed);
+                noise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2S);
+                noise.SetFractalType(FastNoiseLite.FractalType.FBm);
+                noise.SetFractalOctaves(octaves);
+                Noises.Add(key, noise);
             }
-            return total / weight;
-        }
-
-        private static float ValueNoise(int seed, float x, float z)
-        {
-            int xi = Mathf.FloorToInt(x), zi = Mathf.FloorToInt(z);
-            float tx = Smooth01(x - xi), tz = Smooth01(z - zi);
-            float a = Hash01(seed, xi, zi), b = Hash01(seed, xi + 1, zi);
-            float c = Hash01(seed, xi, zi + 1), d = Hash01(seed, xi + 1, zi + 1);
-            return Mathf.Lerp(Mathf.Lerp(a, b, tx), Mathf.Lerp(c, d, tx), tz);
-        }
-
-        private static float Hash01(int seed, int x, int z)
-        {
-            unchecked
-            {
-                uint h = (uint)seed;
-                h ^= (uint)x * 0x9e3779b9u; h = (h << 13) | (h >> 19);
-                h ^= (uint)z * 0x85ebca6bu; h *= 0xc2b2ae35u;
-                return (h & 0x00ffffffu) / 16777215f;
-            }
+            return (noise.GetNoise(x, z) + 1f) * .5f;
         }
         private static float Smooth01(float t) => t * t * (3f - 2f * t);
     }
