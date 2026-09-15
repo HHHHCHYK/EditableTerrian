@@ -1,8 +1,7 @@
 using NUnit.Framework;
 using UnityEngine;
-using UnityEngine.TestTools;
-using System.Collections;
 using System.IO;
+using System.Reflection;
 
 namespace Humanier.Terrain.Tests
 {
@@ -25,19 +24,71 @@ namespace Humanier.Terrain.Tests
             float surface = TerrainGenerator.SurfaceHeight(settings, 11, -23);
             Assert.Greater(TerrainGenerator.InitialDensity(settings, new Vector3(11, surface - 60.1f, -23)), 0f);
         }
-        [UnityTest]
-        public IEnumerator DigChangesLoadedDensity()
+        [Test]
+        public void BiomeDefinitionsControlSurfaceAndInteriorMaterials()
         {
-            var worldObject = new GameObject("Terrain test");
+            settings.grassland.surfaceMaterial = 11;
+            settings.grassland.interiorMaterial = 12;
+            settings.desert.surfaceMaterial = 21;
+            settings.desert.interiorMaterial = 22;
+            settings.rockyMountains.surfaceMaterial = 31;
+            settings.rockyMountains.interiorMaterial = 32;
+            for (int x = -256; x <= 256; x += 32)
+            for (int z = -256; z <= 256; z += 32)
+            {
+                TerrainBiome biome = TerrainGenerator.SampleBiome(settings.seed, x, z);
+                TerrainBiomeDefinition definition = settings.GetBiomeDefinition(biome);
+                float surface = TerrainGenerator.SurfaceHeight(settings, x, z);
+                Assert.AreEqual(definition.surfaceMaterial, TerrainGenerator.MaterialAt(settings, new Vector3(x, surface - .1f, z)));
+                Assert.AreEqual(definition.interiorMaterial, TerrainGenerator.MaterialAt(settings, new Vector3(x, surface - settings.surfaceMaterialDepth - 1f, z)));
+            }
+        }
+        [Test]
+        public void DefaultFillUsesLocalSurfaceMaterial()
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 6, 0));
+            Vector3 point = data.WorldPoint(0, 0, 0);
+            Assert.IsTrue(data.Apply(settings, TerrainEditRequest.Fill(point, 1f)));
+            Assert.AreEqual(TerrainGenerator.SurfaceMaterialAt(settings, point.x, point.z), data.GetMaterial(0, 0, 0));
+        }
+        [Test]
+        public void RaycastOnlyReturnsChunksOwnedByThisWorld()
+        {
+            var firstObject = new GameObject("First terrain world");
+            var secondObject = new GameObject("Second terrain world");
+            var first = firstObject.AddComponent<TerrainWorld>();
+            var second = secondObject.AddComponent<TerrainWorld>();
+            GameObject otherChunk = CreateRaycastChunk("Other terrain chunk", new Vector3(0f, 0f, 2f), second);
+            GameObject ownChunk = CreateRaycastChunk("Owned terrain chunk", new Vector3(0f, 0f, 4f), first);
+            Physics.SyncTransforms();
+
+            Assert.IsTrue(first.TryRaycast(new Ray(Vector3.zero, Vector3.forward), 10f, out TerrainRaycastHit hit, 1 << 8));
+            Assert.AreSame(ownChunk.GetComponent<Collider>(), hit.collider);
+
+            Object.DestroyImmediate(otherChunk);
+            Object.DestroyImmediate(ownChunk);
+            Object.DestroyImmediate(firstObject);
+            Object.DestroyImmediate(secondObject);
+        }
+        [Test]
+        public void StreamingPlanStaysWithinConfiguredDensityCapacity()
+        {
+            var worldObject = new GameObject("Terrain streaming plan");
             var world = worldObject.AddComponent<TerrainWorld>();
-            float height = world.SampleSurfaceHeight(Vector3.zero);
-            Vector3 point = new Vector3(0, height - .5f, 0);
-            float before = world.SampleDensity(point);
-            TerrainEditHandle edit = world.RequestEdit(TerrainEditRequest.Dig(point, 2f));
-            while (edit.Status == TerrainEditStatus.Queued || edit.Status == TerrainEditStatus.Processing) yield return null;
-            Assert.AreEqual(TerrainEditStatus.Completed, edit.Status);
-            Assert.Less(world.SampleDensity(point), before);
+            Invoke(world, "BuildStreamingPlan", new TerrainChunkId(0, 0, 0));
+            var plan = (System.Collections.ICollection)GetField(world, "streamingPlan");
+            int maxResident = (int)Invoke(world, "MaxResidentChunkCount");
+            Assert.LessOrEqual(plan.Count, maxResident);
             Object.DestroyImmediate(worldObject);
+        }
+        [Test]
+        public void DigChangesChunkDensity()
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+            Vector3 point = data.WorldPoint(0, 0, 0);
+            float before = data.GetDensity(0, 0, 0);
+            Assert.IsTrue(data.Apply(settings, TerrainEditRequest.Dig(point, 2f)));
+            Assert.Less(data.GetDensity(0, 0, 0), before);
         }
         [Test]
         public void SessionCacheRestoresOnlyWithinItsSessionNamespace()
@@ -67,5 +118,17 @@ namespace Humanier.Terrain.Tests
             Assert.IsFalse(cache.TryLoad(new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0))));
             Assert.IsNotEmpty(cache.LastError);
         }
+
+        private static GameObject CreateRaycastChunk(string name, Vector3 position, TerrainWorld owner)
+        {
+            var result = new GameObject(name) { layer = 8 };
+            result.transform.position = position;
+            result.AddComponent<BoxCollider>();
+            var marker = result.AddComponent<TerrainChunkMarker>();
+            marker.Owner = owner;
+            return result;
+        }
+        private static object Invoke(object target, string name, params object[] arguments) => target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(target, arguments);
+        private static object GetField(object target, string name) => target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(target);
     }
 }

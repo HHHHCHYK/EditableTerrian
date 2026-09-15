@@ -1,0 +1,6 @@
+{
+  "name": "Humanier.Terrain.PlayModeTests",
+  "rootNamespace": "Humanier.Terrain.Tests",
+  "references": ["Humanier.Terrain.Runtime"],
+  "optionalUnityReferences": ["TestAssemblies"]
+}

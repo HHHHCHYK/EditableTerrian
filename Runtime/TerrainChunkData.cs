@@ -25,7 +25,7 @@ namespace Humanier.Terrain
                 int index = Index(x, y, z);
                 Vector3 point = WorldPoint(x, y, z);
                 Density[index] = TerrainGenerator.InitialDensity(settings, point);
-                Material[index] = TerrainGenerator.MaterialAt(settings, point.x, point.z);
+                Material[index] = TerrainGenerator.MaterialAt(settings, point);
             }
         }
 
@@ -80,7 +80,7 @@ namespace Humanier.Terrain
                     default: target = request.flattenHeight - point.y; break;
                 }
                 Density[index] = Mathf.Lerp(before, target, falloff * strength);
-                if (request.mode == TerrainBrushMode.Fill && Density[index] > 0f) Material[index] = request.material;
+                if (request.mode == TerrainBrushMode.Fill && Density[index] > 0f) Material[index] = request.material == 0 ? TerrainGenerator.SurfaceMaterialAt(settings, point.x, point.z) : request.material;
                 changed |= !Mathf.Approximately(before, Density[index]);
             }
             if (changed) { IsModified = true; Version++; }

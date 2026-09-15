@@ -119,6 +119,6 @@ namespace Humanier.Terrain
             int x = math.clamp((int)math.round((point.x - offset.x) / voxelSize), 1, resolution - 1), y = math.clamp((int)math.round((point.y - offset.y) / voxelSize), 1, resolution - 1), z = math.clamp((int)math.round((point.z - offset.z) / voxelSize), 1, resolution - 1);
             return math.normalizesafe(new float3(D(x - 1,y,z) - D(x + 1,y,z), D(x,y - 1,z) - D(x,y + 1,z), D(x,y,z - 1) - D(x,y,z + 1)));
         }
-        private Color32 C(float3 p){int x=math.clamp((int)math.round((p.x-offset.x)/voxelSize),0,resolution),y=math.clamp((int)math.round((p.y-offset.y)/voxelSize),0,resolution),z=math.clamp((int)math.round((p.z-offset.z)/voxelSize),0,resolution);byte m=materials[x+(resolution+1)*(y+(resolution+1)*z)];return m==2?new Color32(199,148,74,255):m==3?new Color32(97,107,102,255):new Color32(64,148,66,255);}
+        private Color32 C(float3 p){int x=math.clamp((int)math.round((p.x-offset.x)/voxelSize),0,resolution),y=math.clamp((int)math.round((p.y-offset.y)/voxelSize),0,resolution),z=math.clamp((int)math.round((p.z-offset.z)/voxelSize),0,resolution);byte m=materials[x+(resolution+1)*(y+(resolution+1)*z)];return m==2?new Color32(199,148,74,255):m==3?new Color32(97,107,102,255):m==4?new Color32(117,87,58,255):new Color32(64,148,66,255);}
     }
 }
