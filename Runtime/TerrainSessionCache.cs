@@ -21,7 +21,7 @@ namespace Humanier.Terrain
                 Directory.CreateDirectory(directory);
                 string target = Path.Combine(directory, $"{data.Id.x}_{data.Id.y}_{data.Id.z}.bin");
                 using (var file = File.Create(target))
-                using (var gzip = new GZipStream(file, CompressionLevel.Fastest))
+                using (var gzip = new GZipStream(file, System.IO.Compression.CompressionLevel.Fastest))
                 using (var writer = new BinaryWriter(gzip))
                 {
                     writer.Write(data.Density.Length);
