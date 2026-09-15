@@ -53,5 +53,23 @@ namespace Humanier.Terrain
             }
             catch (Exception exception) { LastError = exception.Message; return false; }
         }
+
+        public bool TryResumeWrites()
+        {
+            string probe = Path.Combine(directory, ".write-probe");
+            try
+            {
+                Directory.CreateDirectory(directory);
+                using (FileStream file = File.Open(probe, FileMode.Create, FileAccess.Write, FileShare.None)) file.WriteByte(0);
+                File.Delete(probe);
+                LastError = null;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                LastError = exception.Message;
+                return false;
+            }
+        }
     }
 }

@@ -3,20 +3,52 @@ using UnityEngine;
 
 namespace Humanier.Terrain
 {
+    internal readonly struct TerrainColumnSample
+    {
+        public readonly float SurfaceHeight;
+        public readonly float BedrockHeight;
+        public readonly TerrainBiome Biome;
+        public readonly byte SurfaceMaterial;
+        public readonly byte InteriorMaterial;
+
+        public TerrainColumnSample(float surfaceHeight, float bedrockHeight, TerrainBiome biome, byte surfaceMaterial, byte interiorMaterial)
+        {
+            SurfaceHeight = surfaceHeight;
+            BedrockHeight = bedrockHeight;
+            Biome = biome;
+            SurfaceMaterial = surfaceMaterial;
+            InteriorMaterial = interiorMaterial;
+        }
+
+        public float InitialDensity(TerrainWorldSettings settings, float y)
+        {
+            float density = SurfaceHeight - y;
+            return IsProtected(settings, y) ? Mathf.Max(1f, density) : density;
+        }
+
+        public byte MaterialAt(TerrainWorldSettings settings, float y) => SurfaceHeight - y <= settings.surfaceMaterialDepth ? SurfaceMaterial : InteriorMaterial;
+        public bool IsProtected(TerrainWorldSettings settings, float y) => y <= BedrockHeight || y <= SurfaceHeight - settings.absoluteProtectionDepth;
+    }
+
     public static class TerrainGenerator
     {
         private static readonly Dictionary<int, FastNoiseLite> Noises = new Dictionary<int, FastNoiseLite>();
         public static TerrainBiome SampleBiome(int seed, float x, float z)
         {
             GetBiomeWeights(seed, x, z, out float grassland, out float desert, out float mountains);
-            if (mountains >= grassland && mountains >= desert) return TerrainBiome.RockyMountains;
-            return desert > grassland ? TerrainBiome.Desert : TerrainBiome.Grassland;
+            return SelectBiome(grassland, desert, mountains);
         }
 
         public static float SurfaceHeight(TerrainWorldSettings settings, float x, float z)
         {
+            return CalculateSurfaceHeight(settings, x, z, out _);
+        }
+
+        private static float CalculateSurfaceHeight(TerrainWorldSettings settings, float x, float z, out TerrainBiome biome)
+        {
             int seed = settings.seed;
             GetBiomeWeights(seed, x, z, out float grasslandWeight, out float desertWeight, out float mountainWeight);
+            biome = SelectBiome(grasslandWeight, desertWeight, mountainWeight);
             TerrainBiomeDefinition grassland = settings.GetBiomeDefinition(TerrainBiome.Grassland);
             TerrainBiomeDefinition desert = settings.GetBiomeDefinition(TerrainBiome.Desert);
             TerrainBiomeDefinition mountains = settings.GetBiomeDefinition(TerrainBiome.RockyMountains);
@@ -31,26 +63,47 @@ namespace Humanier.Terrain
 
         public static float BedrockHeight(TerrainWorldSettings settings, float x, float z)
         {
-            float depth = Mathf.Lerp(settings.minBedrockDepth, settings.maxBedrockDepth, Fractal(settings.seed + 191, x * .009f, z * .009f, 3));
-            return SurfaceHeight(settings, x, z) - depth;
+            return SampleColumn(settings, x, z).BedrockHeight;
         }
 
         public static float InitialDensity(TerrainWorldSettings settings, Vector3 world)
         {
-            float surface = SurfaceHeight(settings, world.x, world.z);
-            float density = surface - world.y;
-            float bedrock = BedrockHeight(settings, world.x, world.z);
-            if (world.y <= bedrock || world.y <= surface - settings.absoluteProtectionDepth) return Mathf.Max(1f, density);
-            return density;
+            return SampleColumn(settings, world.x, world.z).InitialDensity(settings, world.y);
         }
 
         public static byte MaterialAt(TerrainWorldSettings settings, Vector3 world)
         {
-            TerrainBiomeDefinition biome = settings.GetBiomeDefinition(SampleBiome(settings.seed, world.x, world.z));
-            return SurfaceHeight(settings, world.x, world.z) - world.y <= settings.surfaceMaterialDepth ? biome.surfaceMaterial : biome.interiorMaterial;
+            return SampleColumn(settings, world.x, world.z).MaterialAt(settings, world.y);
         }
 
         public static byte SurfaceMaterialAt(TerrainWorldSettings settings, float x, float z) => settings.GetBiomeDefinition(SampleBiome(settings.seed, x, z)).surfaceMaterial;
+
+        internal static TerrainColumnSample SampleColumn(TerrainWorldSettings settings, float x, float z)
+        {
+            float surface = CalculateSurfaceHeight(settings, x, z, out TerrainBiome biome);
+            float depth = Mathf.Lerp(settings.minBedrockDepth, settings.maxBedrockDepth, Fractal(settings.seed + 191, x * .009f, z * .009f, 3));
+            TerrainBiomeDefinition definition = settings.GetBiomeDefinition(biome);
+            return new TerrainColumnSample(surface, surface - depth, biome, definition.surfaceMaterial, definition.interiorMaterial);
+        }
+
+        internal static void PopulateChunk(TerrainWorldSettings settings, TerrainChunkId id, int resolution, float voxelSize, float[] density, byte[] material)
+        {
+            int samplesPerAxis = resolution + 1;
+            for (int z = 0; z <= resolution; z++)
+            for (int x = 0; x <= resolution; x++)
+            {
+                float worldX = (id.x * resolution + x) * voxelSize;
+                float worldZ = (id.z * resolution + z) * voxelSize;
+                TerrainColumnSample column = SampleColumn(settings, worldX, worldZ);
+                for (int y = 0; y <= resolution; y++)
+                {
+                    float worldY = (id.y * resolution + y) * voxelSize;
+                    int index = x + samplesPerAxis * (y + samplesPerAxis * z);
+                    density[index] = column.InitialDensity(settings, worldY);
+                    material[index] = column.MaterialAt(settings, worldY);
+                }
+            }
+        }
 
         private static void GetBiomeWeights(int seed, float x, float z, out float grassland, out float desert, out float mountains)
         {
@@ -59,6 +112,11 @@ namespace Humanier.Terrain
             mountains = Smooth01((erosion - .52f) / .20f);
             desert = (1f - mountains) * (1f - Smooth01((climate - .34f) / .20f));
             grassland = Mathf.Max(0f, 1f - mountains - desert);
+        }
+        private static TerrainBiome SelectBiome(float grassland, float desert, float mountains)
+        {
+            if (mountains >= grassland && mountains >= desert) return TerrainBiome.RockyMountains;
+            return desert > grassland ? TerrainBiome.Desert : TerrainBiome.Grassland;
         }
         private static float Blend(float grassland, float desert, float mountains, float grasslandWeight, float desertWeight, float mountainWeight) => grassland * grasslandWeight + desert * desertWeight + mountains * mountainWeight;
 

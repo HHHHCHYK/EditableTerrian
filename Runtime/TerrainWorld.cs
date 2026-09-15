@@ -30,10 +30,20 @@ namespace Humanier.Terrain
         private int streamingPlanIndex;
         private bool hasStreamingPlan;
         private int activeMeshBuilds;
+        private PendingEdit activeEdit;
+        private bool hasActiveEdit;
 
-        public TerrainWorldSettings Settings => settings != null ? settings : generatedSettings;
+        public TerrainWorldSettings Settings
+        {
+            get
+            {
+                EnsureSettings();
+                return settings != null ? settings : generatedSettings;
+            }
+        }
         public Vector3 OriginOffset => originOffset;
         public bool CacheWriteBlocked => cacheWriteBlocked;
+        public string CacheError => cache == null ? null : cache.LastError;
         public event Action<string> CacheWriteFailed;
 
         private sealed class LoadedChunk
@@ -64,12 +74,7 @@ namespace Humanier.Terrain
 
         private void Awake()
         {
-            if (settings == null)
-            {
-                generatedSettings = ScriptableObject.CreateInstance<TerrainWorldSettings>();
-                generatedSettings.name = "Runtime Terrain Settings";
-            }
-            cache = new TerrainSessionCache(Settings.seed, Guid.NewGuid().ToString("N"));
+            EnsureInitialized();
             if (Settings.terrainMaterial == null)
             {
                 Shader shader = Shader.Find("Humanier/Terrain Low Poly");
@@ -99,6 +104,7 @@ namespace Humanier.Terrain
 
         private void OnDestroy()
         {
+            FailPendingEdits("Terrain world was destroyed before the edit completed.");
             foreach (LoadedChunk chunk in chunks.Values)
             {
                 if (chunk.pendingMesh != null) { chunk.pendingMesh.Dispose(); activeMeshBuilds--; }
@@ -112,8 +118,13 @@ namespace Humanier.Terrain
         public void SetOriginOffset(Vector3 value)
         {
             if (value == originOffset) return;
+            Vector3 compensation = originOffset - value;
             originOffset = value;
-            foreach (LoadedChunk chunk in chunks.Values) RebuildChunk(chunk);
+            foreach (LoadedChunk chunk in chunks.Values)
+            {
+                chunk.gameObject.transform.localPosition += compensation;
+                RebuildChunk(chunk);
+            }
         }
 
         public TerrainBiome SampleBiome(Vector3 worldPosition) => TerrainGenerator.SampleBiome(Settings.seed, worldPosition.x + originOffset.x, worldPosition.z + originOffset.z);
@@ -147,6 +158,7 @@ namespace Humanier.Terrain
 
         public TerrainEditHandle RequestEdit(TerrainEditRequest request)
         {
+            EnsureInitialized();
             var handle = new TerrainEditHandle();
             if (cacheWriteBlocked) { handle.Status = TerrainEditStatus.CacheFailure; handle.Error = "Terrain cache is unavailable; editing is paused to protect modified terrain."; handle.Notify(); return handle; }
             if (!IsFinite(request.worldCenter) || !IsFinite(request.radius) || !IsFinite(request.strength) || !IsFinite(request.flattenHeight) || request.radius <= 0f || request.radius > 64f)
@@ -159,6 +171,19 @@ namespace Humanier.Terrain
             return handle;
         }
 
+        public bool TryResumeCacheWrites()
+        {
+            EnsureInitialized();
+            if (!cacheWriteBlocked) return true;
+            if (!cache.TryResumeWrites())
+            {
+                CacheWriteFailed?.Invoke(cache.LastError);
+                return false;
+            }
+            cacheWriteBlocked = false;
+            return true;
+        }
+
         private IEnumerator ProcessEdits()
         {
             processingEdit = true;
@@ -166,7 +191,10 @@ namespace Humanier.Terrain
             {
                 if (cacheWriteBlocked) { yield return null; continue; }
                 PendingEdit pending = editQueue.Dequeue();
+                activeEdit = pending;
+                hasActiveEdit = true;
                 yield return ApplyEdit(pending.request, pending.handle);
+                hasActiveEdit = false;
             }
             processingEdit = false;
         }
@@ -211,27 +239,35 @@ namespace Humanier.Terrain
         {
             int horizontal = Mathf.CeilToInt(Settings.viewDistance / Settings.ChunkSize);
             int radiusSquared = horizontal * horizontal;
-            int horizontalColumns = 0;
-            for (int z = -horizontal; z <= horizontal; z++)
-            for (int x = -horizontal; x <= horizontal; x++)
-                if (x * x + z * z <= radiusSquared) horizontalColumns++;
-
-            int requestedVerticalCount = Mathf.Max(1, verticalChunksBelowFocus + verticalChunksAboveFocus + 1);
-            int verticalCount = Mathf.Min(requestedVerticalCount, Mathf.Max(1, MaxResidentChunkCount() / horizontalColumns));
-            float belowRatio = (float)verticalChunksBelowFocus / Mathf.Max(1, requestedVerticalCount - 1);
-            int below = Mathf.Clamp(Mathf.RoundToInt((verticalCount - 1) * belowRatio), 0, verticalCount - 1);
-            int above = verticalCount - below - 1;
+            Vector3 planFocus = ChunkCenter(center);
+            var candidates = new Dictionary<TerrainChunkId, float>();
             for (int z = -horizontal; z <= horizontal; z++)
             for (int x = -horizontal; x <= horizontal; x++)
             {
                 if (x * x + z * z > radiusSquared) continue;
-                for (int y = -below; y <= above; y++)
+                float worldX = (center.x + x + .5f) * Settings.ChunkSize;
+                float worldZ = (center.z + z + .5f) * Settings.ChunkSize;
+                TerrainColumnSample column = TerrainGenerator.SampleColumn(Settings, worldX, worldZ);
+                var surfaceId = new TerrainChunkId(center.x + x, Mathf.FloorToInt(column.SurfaceHeight / Settings.ChunkSize), center.z + z);
+                AddStreamingCandidate(candidates, surfaceId, planFocus);
+            }
+
+            int nearRadius = Mathf.CeilToInt(Settings.nearUndergroundDistance / Settings.ChunkSize);
+            int nearRadiusSquared = nearRadius * nearRadius;
+            for (int z = -nearRadius; z <= nearRadius; z++)
+            for (int x = -nearRadius; x <= nearRadius; x++)
+            {
+                if (x * x + z * z > nearRadiusSquared) continue;
+                for (int y = -verticalChunksBelowFocus; y <= verticalChunksAboveFocus; y++)
                 {
                     var id = new TerrainChunkId(center.x + x, center.y + y, center.z + z);
-                    if (!chunks.ContainsKey(id)) streamingPlan.Add(new ChunkPriority { id = id, distanceSquared = x * x + y * y + z * z });
+                    AddStreamingCandidate(candidates, id, planFocus);
                 }
             }
+            foreach (KeyValuePair<TerrainChunkId, float> candidate in candidates)
+                if (!chunks.ContainsKey(candidate.Key)) streamingPlan.Add(new ChunkPriority { id = candidate.Key, distanceSquared = candidate.Value });
             streamingPlan.Sort((a, b) => a.distanceSquared.CompareTo(b.distanceSquared));
+            if (streamingPlan.Count > MaxResidentChunkCount()) streamingPlan.RemoveRange(MaxResidentChunkCount(), streamingPlan.Count - MaxResidentChunkCount());
         }
         private void QueueChunk(TerrainChunkId id)
         {
@@ -315,6 +351,7 @@ namespace Humanier.Terrain
         private static void AssignMesh(LoadedChunk chunk, Mesh next)
         {
             Mesh old = chunk.filter.sharedMesh;
+            chunk.gameObject.transform.localPosition = Vector3.zero;
             chunk.filter.sharedMesh = next;
             if (chunk.collider != null) chunk.collider.sharedMesh = next;
             if (old != null) Destroy(old);
@@ -420,6 +457,43 @@ namespace Humanier.Terrain
         }
 
         private Vector3 ChunkCenter(TerrainChunkId id) => new Vector3((id.x + .5f) * Settings.ChunkSize, (id.y + .5f) * Settings.ChunkSize, (id.z + .5f) * Settings.ChunkSize);
+
+        private void AddStreamingCandidate(Dictionary<TerrainChunkId, float> candidates, TerrainChunkId id, Vector3 focusPoint)
+        {
+            float priority = (ChunkCenter(id) - focusPoint).sqrMagnitude;
+            if (!candidates.TryGetValue(id, out float existing) || priority < existing) candidates[id] = priority;
+        }
+
+        private void EnsureSettings()
+        {
+            if (settings != null || generatedSettings != null) return;
+            generatedSettings = ScriptableObject.CreateInstance<TerrainWorldSettings>();
+            generatedSettings.name = "Runtime Terrain Settings";
+        }
+
+        private void EnsureInitialized()
+        {
+            EnsureSettings();
+            if (cache == null) cache = new TerrainSessionCache(Settings.seed, Guid.NewGuid().ToString("N"));
+        }
+
+        private void FailPendingEdits(string error)
+        {
+            if (hasActiveEdit)
+            {
+                activeEdit.handle.Status = TerrainEditStatus.Cancelled;
+                activeEdit.handle.Error = error;
+                activeEdit.handle.Notify();
+                hasActiveEdit = false;
+            }
+            while (editQueue.Count > 0)
+            {
+                PendingEdit pending = editQueue.Dequeue();
+                pending.handle.Status = TerrainEditStatus.Cancelled;
+                pending.handle.Error = error;
+                pending.handle.Notify();
+            }
+        }
         private int MaxResidentChunkCount()
         {
             long bytesPerChunk = (long)Settings.SampleResolution * Settings.SampleResolution * Settings.SampleResolution * (sizeof(float) + sizeof(byte));

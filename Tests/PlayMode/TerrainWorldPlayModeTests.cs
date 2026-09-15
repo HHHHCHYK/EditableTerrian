@@ -24,5 +24,19 @@ namespace Humanier.Terrain.Tests
             Assert.Less(world.SampleDensity(point), before);
             Object.Destroy(worldObject);
         }
+
+        [UnityTest]
+        public IEnumerator DestroyedWorldCancelsQueuedEdit()
+        {
+            var worldObject = new GameObject("Terrain cancellation test");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            yield return null;
+
+            TerrainEditHandle edit = world.RequestEdit(TerrainEditRequest.Dig(Vector3.zero, 64f));
+            Object.Destroy(worldObject);
+            yield return null;
+
+            Assert.AreEqual(TerrainEditStatus.Cancelled, edit.Status);
+        }
     }
 }

@@ -5,7 +5,7 @@ namespace Humanier.Terrain
 {
     public enum TerrainBiome { Grassland, Desert, RockyMountains }
     public enum TerrainBrushMode { Dig, Fill, Flatten }
-    public enum TerrainEditStatus { Queued, Processing, Completed, Rejected, CacheFailure }
+    public enum TerrainEditStatus { Queued, Processing, Completed, Rejected, CacheFailure, Cancelled }
 
     [Serializable]
     public struct TerrainChunkId : IEquatable<TerrainChunkId>

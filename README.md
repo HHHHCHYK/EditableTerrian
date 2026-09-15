@@ -8,8 +8,8 @@ Create a `TerrainWorld` GameObject and assign a `TerrainWorldSettings` asset. Se
 
 For the included scene, run `Humanier > Terrain > Create Demo Scene` in the Unity Editor. The created explorer camera uses the mouse to target terrain, left click to apply the selected brush, number keys `1` through `3` to select dig/fill/flatten, and the wheel to set a 0.5–64 m brush radius.
 
-`SampleBiome`, `SampleSurfaceHeight`, `SampleDensity`, `TryRaycast`, `IsCollisionReady`, and `SetOriginOffset` are public query/control APIs. Edits execute in request order. The writable density field stays package-internal, so edits always obey the bedrock and 60-metre protection rules.
+`SampleBiome`, `SampleSurfaceHeight`, `SampleDensity`, `TryRaycast`, `IsCollisionReady`, `SetOriginOffset`, and `TryResumeCacheWrites` are public query/control APIs. Edits execute in request order. The writable density field stays package-internal, so edits always obey the bedrock and 60-metre protection rules.
 
 ## Limits in 0.1.0
 
-The current package provides distance-based mesh decimation with Transvoxel transition cells, incremental edit batching, bounded CPU chunk caching, and gzip session caching in `Application.temporaryCachePath`. Each `TerrainWorld` instance owns a unique cache namespace, so a fresh application session always regenerates the source world.
+The current package provides distance-based mesh decimation with Transvoxel transition cells, bounded mesh jobs, incremental edit batching, bounded CPU chunk caching, and gzip session caching in `Application.temporaryCachePath`. Each `TerrainWorld` instance owns a unique cache namespace, so a fresh application session always regenerates the source world. Cache write failures pause streaming and edits until `TryResumeCacheWrites` verifies the temporary cache is writable again.

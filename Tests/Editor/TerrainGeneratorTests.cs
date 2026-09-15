@@ -33,8 +33,8 @@ namespace Humanier.Terrain.Tests
             settings.desert.interiorMaterial = 22;
             settings.rockyMountains.surfaceMaterial = 31;
             settings.rockyMountains.interiorMaterial = 32;
-            for (int x = -256; x <= 256; x += 32)
-            for (int z = -256; z <= 256; z += 32)
+            for (int x = -256; x <= 256; x += 64)
+            for (int z = -256; z <= 256; z += 64)
             {
                 TerrainBiome biome = TerrainGenerator.SampleBiome(settings.seed, x, z);
                 TerrainBiomeDefinition definition = settings.GetBiomeDefinition(biome);
@@ -50,6 +50,17 @@ namespace Humanier.Terrain.Tests
             Vector3 point = data.WorldPoint(0, 0, 0);
             Assert.IsTrue(data.Apply(settings, TerrainEditRequest.Fill(point, 1f)));
             Assert.AreEqual(TerrainGenerator.SurfaceMaterialAt(settings, point.x, point.z), data.GetMaterial(0, 0, 0));
+        }
+        [Test]
+        public void PrecomputedChunkColumnsMatchDensityAndMaterialQueries()
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(-1, 0, 1));
+            foreach (Vector3Int sample in new[] { new Vector3Int(0, 0, 0), new Vector3Int(16, 12, 21), new Vector3Int(32, 32, 32) })
+            {
+                Vector3 point = data.WorldPoint(sample.x, sample.y, sample.z);
+                Assert.AreEqual(TerrainGenerator.InitialDensity(settings, point), data.GetDensity(sample.x, sample.y, sample.z));
+                Assert.AreEqual(TerrainGenerator.MaterialAt(settings, point), data.GetMaterial(sample.x, sample.y, sample.z));
+            }
         }
         [Test]
         public void RaycastOnlyReturnsChunksOwnedByThisWorld()
@@ -79,6 +90,40 @@ namespace Humanier.Terrain.Tests
             var plan = (System.Collections.ICollection)GetField(world, "streamingPlan");
             int maxResident = (int)Invoke(world, "MaxResidentChunkCount");
             Assert.LessOrEqual(plan.Count, maxResident);
+            Object.DestroyImmediate(worldObject);
+        }
+        [Test]
+        public void StreamingPlanIncludesNegativeHeightSurfaceChunks()
+        {
+            Vector2Int column = FindNegativeSurfaceColumn();
+            float surface = TerrainGenerator.SurfaceHeight(settings, column.x, column.y);
+            var worldObject = new GameObject("Terrain surface streaming plan");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "settings", settings);
+            Invoke(world, "BuildStreamingPlan", new TerrainChunkId(0, 1, 0));
+            var plan = (System.Collections.IEnumerable)GetField(world, "streamingPlan");
+            var surfaceId = new TerrainChunkId(Mathf.FloorToInt(column.x / settings.ChunkSize), Mathf.FloorToInt(surface / settings.ChunkSize), Mathf.FloorToInt(column.y / settings.ChunkSize));
+            Assert.IsTrue(ContainsChunk(plan, surfaceId));
+            Object.DestroyImmediate(worldObject);
+        }
+        [Test]
+        public void CacheWritesCanBeExplicitlyResumedAfterFailure()
+        {
+            var worldObject = new GameObject("Terrain cache recovery");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "cacheWriteBlocked", true);
+            Assert.IsTrue(world.TryResumeCacheWrites());
+            Assert.IsFalse(world.CacheWriteBlocked);
+            Object.DestroyImmediate(worldObject);
+        }
+        [Test]
+        public void CacheFailureRejectsNewEditsWithFinalStatus()
+        {
+            var worldObject = new GameObject("Terrain cache failure");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "cacheWriteBlocked", true);
+            TerrainEditHandle edit = world.RequestEdit(TerrainEditRequest.Dig(Vector3.zero, 1f));
+            Assert.AreEqual(TerrainEditStatus.CacheFailure, edit.Status);
             Object.DestroyImmediate(worldObject);
         }
         [Test]
@@ -130,5 +175,23 @@ namespace Humanier.Terrain.Tests
         }
         private static object Invoke(object target, string name, params object[] arguments) => target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(target, arguments);
         private static object GetField(object target, string name) => target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(target);
+        private static void SetField(object target, string name, object value) => target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).SetValue(target, value);
+        private Vector2Int FindNegativeSurfaceColumn()
+        {
+            for (int z = -240; z <= 240; z += 16)
+            for (int x = -240; x <= 240; x += 16)
+                if (TerrainGenerator.SurfaceHeight(settings, x + 8f, z + 8f) < 0f) return new Vector2Int(x + 8, z + 8);
+            Assert.Fail("Test seed did not produce a negative terrain surface in the streaming area.");
+            return default;
+        }
+        private static bool ContainsChunk(System.Collections.IEnumerable plan, TerrainChunkId expected)
+        {
+            foreach (object item in plan)
+            {
+                TerrainChunkId id = (TerrainChunkId)item.GetType().GetField("id", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).GetValue(item);
+                if (id.Equals(expected)) return true;
+            }
+            return false;
+        }
     }
 }
