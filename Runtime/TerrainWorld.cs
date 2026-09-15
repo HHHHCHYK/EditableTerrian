@@ -90,7 +90,11 @@ namespace Humanier.Terrain
 
         public TerrainBiome SampleBiome(Vector3 worldPosition) => TerrainGenerator.SampleBiome(Settings.seed, worldPosition.x + originOffset.x, worldPosition.z + originOffset.z);
         public float SampleSurfaceHeight(Vector3 worldPosition) => TerrainGenerator.SurfaceHeight(Settings, worldPosition.x + originOffset.x, worldPosition.z + originOffset.z) - originOffset.y;
-        public float SampleDensity(Vector3 worldPosition) => TerrainGenerator.InitialDensity(Settings, worldPosition + originOffset);
+        public float SampleDensity(Vector3 worldPosition)
+        {
+            Vector3 globalPosition = worldPosition + originOffset;
+            return chunks.TryGetValue(WorldToChunk(globalPosition), out LoadedChunk chunk) ? chunk.data.SampleDensity(globalPosition) : TerrainGenerator.InitialDensity(Settings, globalPosition);
+        }
         public bool IsCollisionReady(Vector3 worldPosition)
         {
             TerrainChunkId id = WorldToChunk(worldPosition + originOffset);
@@ -99,11 +103,17 @@ namespace Humanier.Terrain
 
         public bool TryRaycast(Ray ray, float maxDistance, out TerrainRaycastHit result, int layerMask = Physics.DefaultRaycastLayers)
         {
-            if (Physics.Raycast(ray, out RaycastHit hit, maxDistance, layerMask, QueryTriggerInteraction.Ignore))
+            RaycastHit[] hits = Physics.RaycastAll(ray, maxDistance, layerMask, QueryTriggerInteraction.Ignore);
+            float closest = float.MaxValue;
+            TerrainRaycastHit closestHit = default;
+            foreach (RaycastHit hit in hits)
             {
-                result = new TerrainRaycastHit { point = hit.point, normal = hit.normal, collider = hit.collider, chunk = WorldToChunk(hit.point + originOffset) };
-                return true;
+                TerrainChunkMarker marker = hit.collider.GetComponent<TerrainChunkMarker>();
+                if (marker == null || hit.distance >= closest) continue;
+                closest = hit.distance;
+                closestHit = new TerrainRaycastHit { point = hit.point, normal = hit.normal, collider = hit.collider, chunk = marker.Id };
             }
+            if (closest < float.MaxValue) { result = closestHit; return true; }
             result = default; return false;
         }
 
@@ -177,6 +187,7 @@ namespace Humanier.Terrain
             var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>(), lod = GetLod(id), lastAccessFrame = frameCounter };
             go.AddComponent<MeshRenderer>().sharedMaterial = Settings.terrainMaterial != null ? Settings.terrainMaterial : generatedMaterial;
             if (generateColliders) loaded.collider = go.AddComponent<MeshCollider>();
+            go.AddComponent<TerrainChunkMarker>().Id = id;
             chunks.Add(id, loaded); RebuildChunk(loaded);
         }
         private void RebuildChunk(LoadedChunk chunk)
@@ -255,5 +266,10 @@ namespace Humanier.Terrain
             if (chunk.filter.sharedMesh != null) Destroy(chunk.filter.sharedMesh);
             Destroy(chunk.gameObject);
         }
+    }
+
+    internal sealed class TerrainChunkMarker : MonoBehaviour
+    {
+        public TerrainChunkId Id { get; set; }
     }
 }

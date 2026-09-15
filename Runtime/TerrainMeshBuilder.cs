@@ -11,13 +11,14 @@ namespace Humanier.Terrain
             { 0, 3, 7, 6 }, { 0, 7, 4, 6 }, { 0, 4, 5, 6 }
         };
         private static readonly int[,] Edges = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
+        private static readonly int[,] Corners = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 0, 0, 1 }, { 0, 1, 0 }, { 1, 1, 0 }, { 1, 1, 1 }, { 0, 1, 1 } };
 
         public static Mesh Build(TerrainChunkData data, Vector3 origin, int lod)
         {
             int resolution = data.Resolution;
             int stride = Mathf.Min(1 << Mathf.Clamp(lod, 0, 5), resolution);
             var vertices = new List<Vector3>(); var triangles = new List<int>(); var colors = new List<Color>();
-            var p = new Vector3[8]; var d = new float[8];
+            var p = new Vector3[8]; var d = new float[8]; var intersections = new Vector3[4];
             for (int z = 0; z < resolution; z += stride)
             for (int y = 0; y < resolution; y += stride)
             for (int x = 0; x < resolution; x += stride)
@@ -26,7 +27,7 @@ namespace Humanier.Terrain
                 bool hasSolid = false, hasAir = false;
                 for (int i = 0; i < 8; i++) { hasSolid |= d[i] > 0f; hasAir |= d[i] <= 0f; }
                 if (!hasSolid || !hasAir) continue;
-                for (int t = 0; t < 6; t++) PolygonizeTetra(data, p, d, Tetrahedra[t, 0], Tetrahedra[t, 1], Tetrahedra[t, 2], Tetrahedra[t, 3], vertices, colors, triangles);
+                for (int t = 0; t < 6; t++) PolygonizeTetra(data, origin, p, d, Tetrahedra[t, 0], Tetrahedra[t, 1], Tetrahedra[t, 2], Tetrahedra[t, 3], intersections, vertices, colors, triangles);
             }
             if (vertices.Count == 0) return null;
             var mesh = new Mesh { indexFormat = vertices.Count > 65535 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16 };
@@ -36,31 +37,36 @@ namespace Humanier.Terrain
 
         private static void FillCube(TerrainChunkData data, int x, int y, int z, int stride, Vector3[] p, float[] d, Vector3 origin)
         {
-            int[] ox = { 0, 1, 1, 0, 0, 1, 1, 0 }; int[] oy = { 0, 0, 0, 0, 1, 1, 1, 1 }; int[] oz = { 0, 0, 1, 1, 0, 0, 1, 1 };
             for (int i = 0; i < 8; i++)
             {
-                int sx = x + ox[i] * stride, sy = y + oy[i] * stride, sz = z + oz[i] * stride;
+                int sx = x + Corners[i, 0] * stride, sy = y + Corners[i, 1] * stride, sz = z + Corners[i, 2] * stride;
                 p[i] = data.WorldPoint(sx, sy, sz) - origin; d[i] = data.GetDensity(sx, sy, sz);
             }
         }
 
-        private static void PolygonizeTetra(TerrainChunkData data, Vector3[] p, float[] d, int a, int b, int c, int e, List<Vector3> vertices, List<Color> colors, List<int> triangles)
+        private static void PolygonizeTetra(TerrainChunkData data, Vector3 origin, Vector3[] p, float[] d, int a, int b, int c, int e, Vector3[] intersections, List<Vector3> vertices, List<Color> colors, List<int> triangles)
         {
-            int[] ids = { a, b, c, e }; var intersections = new List<Vector3>(4);
+            int count = 0;
             for (int edge = 0; edge < 6; edge++)
             {
-                int i = ids[Edges[edge, 0]], j = ids[Edges[edge, 1]];
+                int i = TetraIndex(a, b, c, e, Edges[edge, 0]), j = TetraIndex(a, b, c, e, Edges[edge, 1]);
                 if ((d[i] > 0f) == (d[j] > 0f)) continue;
-                float t = d[i] / (d[i] - d[j]); intersections.Add(Vector3.Lerp(p[i], p[j], t));
+                float t = d[i] / (d[i] - d[j]); intersections[count++] = Vector3.Lerp(p[i], p[j], t);
             }
-            if (intersections.Count < 3) return;
-            AddTriangle(intersections[0], intersections[1], intersections[2], data, vertices, colors, triangles);
-            if (intersections.Count == 4) AddTriangle(intersections[0], intersections[2], intersections[3], data, vertices, colors, triangles);
+            if (count < 3) return;
+            Vector3 solidCenter = Vector3.zero; int solids = 0;
+            AddSolid(p, d, a, ref solidCenter, ref solids); AddSolid(p, d, b, ref solidCenter, ref solids); AddSolid(p, d, c, ref solidCenter, ref solids); AddSolid(p, d, e, ref solidCenter, ref solids);
+            if (solids > 0) solidCenter /= solids;
+            AddTriangle(intersections[0], intersections[1], intersections[2], solidCenter, data, origin, vertices, colors, triangles);
+            if (count == 4) AddTriangle(intersections[0], intersections[2], intersections[3], solidCenter, data, origin, vertices, colors, triangles);
         }
-        private static void AddTriangle(Vector3 a, Vector3 b, Vector3 c, TerrainChunkData data, List<Vector3> vertices, List<Color> colors, List<int> triangles)
+        private static int TetraIndex(int a, int b, int c, int d, int index) => index == 0 ? a : index == 1 ? b : index == 2 ? c : d;
+        private static void AddSolid(Vector3[] p, float[] d, int index, ref Vector3 center, ref int count) { if (d[index] > 0f) { center += p[index]; count++; } }
+        private static void AddTriangle(Vector3 a, Vector3 b, Vector3 c, Vector3 solidCenter, TerrainChunkData data, Vector3 origin, List<Vector3> vertices, List<Color> colors, List<int> triangles)
         {
+            if (Vector3.Dot(Vector3.Cross(b - a, c - a), ((a + b + c) / 3f) - solidCenter) < 0f) { Vector3 swap = b; b = c; c = swap; }
             int index = vertices.Count; vertices.Add(a); vertices.Add(b); vertices.Add(c);
-            Color color = ColorFor(data, (a + b + c) / 3f); colors.Add(color); colors.Add(color); colors.Add(color);
+            Color color = ColorFor(data, (a + b + c) / 3f + origin); colors.Add(color); colors.Add(color); colors.Add(color);
             triangles.Add(index); triangles.Add(index + 1); triangles.Add(index + 2);
         }
         private static Color ColorFor(TerrainChunkData data, Vector3 point)

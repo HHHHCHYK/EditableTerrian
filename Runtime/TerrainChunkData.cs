@@ -33,6 +33,19 @@ namespace Humanier.Terrain
         public int Index(int x, int y, int z) => x + (Resolution + 1) * (y + (Resolution + 1) * z);
         public float GetDensity(int x, int y, int z) => Density[Index(x, y, z)];
         public byte GetMaterial(int x, int y, int z) => Material[Index(x, y, z)];
+        public float SampleDensity(Vector3 globalPoint)
+        {
+            float lx = globalPoint.x / VoxelSize - Id.x * Resolution;
+            float ly = globalPoint.y / VoxelSize - Id.y * Resolution;
+            float lz = globalPoint.z / VoxelSize - Id.z * Resolution;
+            int x = Mathf.Clamp(Mathf.FloorToInt(lx), 0, Resolution - 1), y = Mathf.Clamp(Mathf.FloorToInt(ly), 0, Resolution - 1), z = Mathf.Clamp(Mathf.FloorToInt(lz), 0, Resolution - 1);
+            float tx = Mathf.Clamp01(lx - x), ty = Mathf.Clamp01(ly - y), tz = Mathf.Clamp01(lz - z);
+            float a = Mathf.Lerp(GetDensity(x, y, z), GetDensity(x + 1, y, z), tx);
+            float b = Mathf.Lerp(GetDensity(x, y, z + 1), GetDensity(x + 1, y, z + 1), tx);
+            float c = Mathf.Lerp(GetDensity(x, y + 1, z), GetDensity(x + 1, y + 1, z), tx);
+            float d = Mathf.Lerp(GetDensity(x, y + 1, z + 1), GetDensity(x + 1, y + 1, z + 1), tx);
+            return Mathf.Lerp(Mathf.Lerp(a, b, tz), Mathf.Lerp(c, d, tz), ty);
+        }
         public void Restore(float[] density, byte[] material)
         {
             if (density == null || density.Length != Density.Length) return;
