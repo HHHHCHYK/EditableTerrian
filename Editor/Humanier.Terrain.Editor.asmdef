@@ -1,0 +1,7 @@
+{
+  "name": "Humanier.Terrain.Editor",
+  "rootNamespace": "Humanier.Terrain.Editor",
+  "references": ["Humanier.Terrain.Runtime"],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": true
+}

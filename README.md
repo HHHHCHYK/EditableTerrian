@@ -6,6 +6,8 @@
 
 Create a `TerrainWorld` GameObject and assign a `TerrainWorldSettings` asset. Set a camera or player transform as its focus. Call `RequestEdit` with `TerrainEditRequest.Dig`, `Fill`, or `Flatten`. Edits accept radii from 0.1 through 64 metres and return a `TerrainEditHandle` that reports completion progress.
 
+For the included scene, run `Humanier > Terrain > Create Demo Scene` in the Unity Editor. The created explorer camera uses the mouse to target terrain, left click to apply the selected brush, number keys `1` through `3` to select dig/fill/flatten, and the wheel to set a 0.5–64 m brush radius.
+
 `SampleBiome`, `SampleSurfaceHeight`, `SampleDensity`, `TryRaycast`, `IsCollisionReady`, and `SetOriginOffset` are public query/control APIs. Edits execute in request order. The writable density field stays package-internal, so edits always obey the bedrock and 60-metre protection rules.
 
 ## Limits in 0.1.0
