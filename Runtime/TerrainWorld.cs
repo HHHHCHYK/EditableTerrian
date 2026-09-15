@@ -16,11 +16,13 @@ namespace Humanier.Terrain
         private readonly Dictionary<TerrainChunkId, LoadedChunk> chunks = new Dictionary<TerrainChunkId, LoadedChunk>();
         private readonly Queue<TerrainChunkId> requestedChunks = new Queue<TerrainChunkId>();
         private readonly HashSet<TerrainChunkId> queuedChunks = new HashSet<TerrainChunkId>();
+        private readonly Queue<PendingEdit> editQueue = new Queue<PendingEdit>();
         private TerrainSessionCache cache;
         private TerrainWorldSettings generatedSettings;
         private Material generatedMaterial;
         private Vector3 originOffset;
         private bool cacheWriteBlocked;
+        private bool processingEdit;
         private int frameCounter;
 
         public TerrainWorldSettings Settings => settings != null ? settings : generatedSettings;
@@ -37,6 +39,11 @@ namespace Humanier.Terrain
             public int lod;
             public int lastAccessFrame;
         }
+        private struct PendingEdit
+        {
+            public TerrainEditRequest request;
+            public TerrainEditHandle handle;
+        }
 
         private void Awake()
         {
@@ -45,7 +52,7 @@ namespace Humanier.Terrain
                 generatedSettings = ScriptableObject.CreateInstance<TerrainWorldSettings>();
                 generatedSettings.name = "Runtime Terrain Settings";
             }
-            cache = new TerrainSessionCache(Settings.seed);
+            cache = new TerrainSessionCache(Settings.seed, Guid.NewGuid().ToString("N"));
             if (Settings.terrainMaterial == null)
             {
                 Shader shader = Shader.Find("Humanier/Terrain Low Poly");
@@ -104,8 +111,20 @@ namespace Humanier.Terrain
         {
             var handle = new TerrainEditHandle();
             if (request.radius <= 0f || request.radius > 64f) { handle.Status = TerrainEditStatus.Rejected; handle.Error = "Radius must be within 0.1 and 64 metres."; handle.Notify(); return handle; }
-            StartCoroutine(ApplyEdit(request, handle));
+            editQueue.Enqueue(new PendingEdit { request = request, handle = handle });
+            if (!processingEdit) StartCoroutine(ProcessEdits());
             return handle;
+        }
+
+        private IEnumerator ProcessEdits()
+        {
+            processingEdit = true;
+            while (editQueue.Count > 0)
+            {
+                PendingEdit pending = editQueue.Dequeue();
+                yield return ApplyEdit(pending.request, pending.handle);
+            }
+            processingEdit = false;
         }
 
         private IEnumerator ApplyEdit(TerrainEditRequest request, TerrainEditHandle handle)

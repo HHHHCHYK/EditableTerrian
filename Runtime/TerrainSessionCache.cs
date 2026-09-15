@@ -9,9 +9,9 @@ namespace Humanier.Terrain
     {
         private readonly string directory;
         public string LastError { get; private set; }
-        public TerrainSessionCache(int seed)
+        public TerrainSessionCache(int seed, string sessionId)
         {
-            directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain", seed.ToString());
+            directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain", seed.ToString(), sessionId);
         }
         public bool Save(TerrainChunkData data)
         {
