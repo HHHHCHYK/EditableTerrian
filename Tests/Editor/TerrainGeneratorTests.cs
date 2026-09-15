@@ -38,5 +38,22 @@ namespace Humanier.Terrain.Tests
             Assert.Less(world.SampleDensity(point), before);
             Object.DestroyImmediate(worldObject);
         }
+        [Test]
+        public void SessionCacheRestoresOnlyWithinItsSessionNamespace()
+        {
+            var id = new TerrainChunkId(0, 0, 0);
+            var source = new TerrainChunkData(settings, id);
+            var values = (float[])source.Density.Clone();
+            values[0] = -3f;
+            source.Restore(values, source.Material);
+            string session = System.Guid.NewGuid().ToString("N");
+            var sameSession = new TerrainSessionCache(settings.seed, session);
+            Assert.IsTrue(sameSession.Save(source));
+            var restored = new TerrainChunkData(settings, id);
+            Assert.IsTrue(sameSession.TryLoad(restored));
+            Assert.AreEqual(-3f, restored.Density[0]);
+            var newSession = new TerrainSessionCache(settings.seed, System.Guid.NewGuid().ToString("N"));
+            Assert.IsFalse(newSession.TryLoad(new TerrainChunkData(settings, id)));
+        }
     }
 }
