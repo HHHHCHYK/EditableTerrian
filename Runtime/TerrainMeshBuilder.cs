@@ -12,16 +12,17 @@ namespace Humanier.Terrain
         };
         private static readonly int[,] Edges = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
 
-        public static Mesh Build(TerrainChunkData data, Vector3 origin)
+        public static Mesh Build(TerrainChunkData data, Vector3 origin, int lod)
         {
             int resolution = data.Resolution;
+            int stride = Mathf.Min(1 << Mathf.Clamp(lod, 0, 5), resolution);
             var vertices = new List<Vector3>(); var triangles = new List<int>();
             var p = new Vector3[8]; var d = new float[8];
-            for (int z = 0; z < resolution; z++)
-            for (int y = 0; y < resolution; y++)
-            for (int x = 0; x < resolution; x++)
+            for (int z = 0; z < resolution; z += stride)
+            for (int y = 0; y < resolution; y += stride)
+            for (int x = 0; x < resolution; x += stride)
             {
-                FillCube(data, x, y, z, p, d, origin);
+                FillCube(data, x, y, z, stride, p, d, origin);
                 bool hasSolid = false, hasAir = false;
                 for (int i = 0; i < 8; i++) { hasSolid |= d[i] > 0f; hasAir |= d[i] <= 0f; }
                 if (!hasSolid || !hasAir) continue;
@@ -33,10 +34,14 @@ namespace Humanier.Terrain
             return mesh;
         }
 
-        private static void FillCube(TerrainChunkData data, int x, int y, int z, Vector3[] p, float[] d, Vector3 origin)
+        private static void FillCube(TerrainChunkData data, int x, int y, int z, int stride, Vector3[] p, float[] d, Vector3 origin)
         {
             int[] ox = { 0, 1, 1, 0, 0, 1, 1, 0 }; int[] oy = { 0, 0, 0, 0, 1, 1, 1, 1 }; int[] oz = { 0, 0, 1, 1, 0, 0, 1, 1 };
-            for (int i = 0; i < 8; i++) { p[i] = data.WorldPoint(x + ox[i], y + oy[i], z + oz[i]) - origin; d[i] = data.GetDensity(x + ox[i], y + oy[i], z + oz[i]); }
+            for (int i = 0; i < 8; i++)
+            {
+                int sx = x + ox[i] * stride, sy = y + oy[i] * stride, sz = z + oz[i] * stride;
+                p[i] = data.WorldPoint(sx, sy, sz) - origin; d[i] = data.GetDensity(sx, sy, sz);
+            }
         }
 
         private static void PolygonizeTetra(Vector3[] p, float[] d, int a, int b, int c, int e, List<Vector3> vertices, List<int> triangles)

@@ -20,6 +20,7 @@ namespace Humanier.Terrain
         private TerrainWorldSettings generatedSettings;
         private Vector3 originOffset;
         private bool cacheWriteBlocked;
+        private int frameCounter;
 
         public TerrainWorldSettings Settings => settings != null ? settings : generatedSettings;
         public Vector3 OriginOffset => originOffset;
@@ -32,6 +33,8 @@ namespace Humanier.Terrain
             public GameObject gameObject;
             public MeshFilter filter;
             public MeshCollider collider;
+            public int lod;
+            public int lastAccessFrame;
         }
 
         private void Awake()
@@ -54,6 +57,7 @@ namespace Humanier.Terrain
                 TerrainChunkId id = requestedChunks.Dequeue(); queuedChunks.Remove(id);
                 if (!chunks.ContainsKey(id)) CreateChunk(id);
             }
+            if (++frameCounter % 30 == 0 && focus != null) UpdateLodsAndEvict(focus.position + originOffset);
         }
 
         private void OnDestroy()
@@ -144,14 +148,14 @@ namespace Humanier.Terrain
         {
             var data = new TerrainChunkData(Settings, id); cache.TryLoad(data);
             var go = new GameObject($"Terrain {id}"); go.transform.SetParent(transform, false);
-            var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>() };
+            var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>(), lod = GetLod(id), lastAccessFrame = frameCounter };
             go.AddComponent<MeshRenderer>().sharedMaterial = Settings.terrainMaterial;
             if (generateColliders) loaded.collider = go.AddComponent<MeshCollider>();
             chunks.Add(id, loaded); RebuildChunk(loaded);
         }
         private void RebuildChunk(LoadedChunk chunk)
         {
-            Mesh next = TerrainMeshBuilder.Build(chunk.data, originOffset);
+            Mesh next = TerrainMeshBuilder.Build(chunk.data, originOffset, chunk.lod);
             Mesh old = chunk.filter.sharedMesh;
             chunk.filter.sharedMesh = next;
             if (chunk.collider != null) chunk.collider.sharedMesh = next;
@@ -161,6 +165,69 @@ namespace Humanier.Terrain
         {
             float size = Settings.ChunkSize;
             return new TerrainChunkId(Mathf.FloorToInt(globalPosition.x / size), Mathf.FloorToInt(globalPosition.y / size), Mathf.FloorToInt(globalPosition.z / size));
+        }
+
+        private int GetLod(TerrainChunkId id)
+        {
+            if (focus == null) return 0;
+            Vector3 point = new Vector3((id.x + .5f) * Settings.ChunkSize, (id.y + .5f) * Settings.ChunkSize, (id.z + .5f) * Settings.ChunkSize);
+            float distance = Vector2.Distance(new Vector2(point.x, point.z), new Vector2(focus.position.x + originOffset.x, focus.position.z + originOffset.z));
+            int lod = 0;
+            foreach (float threshold in Settings.lodDistances) { if (distance >= threshold) lod++; else break; }
+            return Mathf.Min(lod, 3);
+        }
+
+        private void UpdateLodsAndEvict(Vector3 globalFocus)
+        {
+            float unloadDistance = Settings.viewDistance + Settings.ChunkSize * 2f;
+            var remove = new List<TerrainChunkId>();
+            foreach (KeyValuePair<TerrainChunkId, LoadedChunk> pair in chunks)
+            {
+                LoadedChunk chunk = pair.Value;
+                float cx = (pair.Key.x + .5f) * Settings.ChunkSize, cz = (pair.Key.z + .5f) * Settings.ChunkSize;
+                float distance = Vector2.Distance(new Vector2(cx, cz), new Vector2(globalFocus.x, globalFocus.z));
+                if (distance > unloadDistance)
+                {
+                    if (!SaveBeforeUnload(chunk)) continue;
+                    remove.Add(pair.Key); continue;
+                }
+                int lod = GetLod(pair.Key);
+                if (lod != chunk.lod) { chunk.lod = lod; RebuildChunk(chunk); }
+                chunk.lastAccessFrame = frameCounter;
+            }
+            foreach (TerrainChunkId id in remove) RemoveChunk(id);
+            EvictForMemoryLimit(remove);
+        }
+
+        private void EvictForMemoryLimit(List<TerrainChunkId> scratch)
+        {
+            long perChunk = (long)Settings.SampleResolution * Settings.SampleResolution * Settings.SampleResolution * (sizeof(float) + sizeof(byte));
+            long limit = Settings.memoryCacheLimitMb * 1024L * 1024L;
+            if (chunks.Count * perChunk <= limit) return;
+            scratch.Clear();
+            foreach (KeyValuePair<TerrainChunkId, LoadedChunk> pair in chunks)
+            {
+                if (!SaveBeforeUnload(pair.Value)) break;
+                scratch.Add(pair.Key);
+                if ((chunks.Count - scratch.Count) * perChunk <= limit) break;
+            }
+            foreach (TerrainChunkId id in scratch) RemoveChunk(id);
+        }
+
+        private bool SaveBeforeUnload(LoadedChunk chunk)
+        {
+            if (cache.Save(chunk.data)) return true;
+            cacheWriteBlocked = true;
+            CacheWriteFailed?.Invoke(cache.LastError);
+            return false;
+        }
+
+        private void RemoveChunk(TerrainChunkId id)
+        {
+            if (!chunks.TryGetValue(id, out LoadedChunk chunk)) return;
+            chunks.Remove(id);
+            if (chunk.filter.sharedMesh != null) Destroy(chunk.filter.sharedMesh);
+            Destroy(chunk.gameObject);
         }
     }
 }

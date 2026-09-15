@@ -10,4 +10,4 @@ Create a `TerrainWorld` GameObject and assign a `TerrainWorldSettings` asset. Se
 
 ## Limits in 0.1.0
 
-The current package provides full-resolution streamed chunks and incremental edit batching. It deliberately does not claim LOD, Transvoxel transitions, Burst/Jobs, or persistent cross-session saves yet. Modified chunks are gzip-cached only in `Application.temporaryCachePath` for the current Unity session. The public data types were designed so those optimizations can be added without changing gameplay callers.
+The current package provides distance-based mesh decimation, incremental edit batching, bounded CPU chunk caching, and gzip session caching in `Application.temporaryCachePath`. Mesh LOD uses shared global density samples and is intended for low-poly visuals; a full Transvoxel transition-cell implementation remains the next rendering upgrade. Modified chunks are deliberately not restored after an application restart.

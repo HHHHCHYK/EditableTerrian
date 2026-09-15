@@ -11,6 +11,8 @@ namespace Humanier.Terrain
         [Range(8, 64)] public int chunkResolution = 32;
         [Min(16f)] public float viewDistance = 256f;
         [Min(1)] public int chunksBuiltPerFrame = 2;
+        [Tooltip("Distance in metres at which each coarser mesh level begins.")]
+        public float[] lodDistances = { 64f, 128f, 256f };
         [Header("Protection")]
         [Range(25f, 40f)] public float minBedrockDepth = 25f;
         [Range(25f, 40f)] public float maxBedrockDepth = 40f;
@@ -26,6 +28,7 @@ namespace Humanier.Terrain
             chunkResolution = Mathf.ClosestPowerOfTwo(Mathf.Clamp(chunkResolution, 8, 64));
             maxBedrockDepth = Mathf.Max(minBedrockDepth, maxBedrockDepth);
             absoluteProtectionDepth = Mathf.Max(60f, absoluteProtectionDepth);
+            if (lodDistances == null || lodDistances.Length == 0) lodDistances = new[] { 64f, 128f, 256f };
         }
     }
 }
