@@ -84,7 +84,7 @@ namespace Humanier.Terrain
         {
             int code = 0; for (int i = 0; i < 8; i++) if (D(x + ((i & 1) * stride), y + (((i >> 2) & 1) * stride), z + (((i >> 1) & 1) * stride)) < 0f) code |= 1 << i;
             int count = regularVertexCount[code]; if (count == 0) return; int start = vertices.Length;
-            for (int i = 0; i < count; i++) { ushort edge = regularVertices[code * 12 + i]; int a = edge >> 4, b = edge & 15; float da = CornerD(x,y,z,a), db = CornerD(x,y,z,b); float3 p = math.lerp(CornerP(x,y,z,a), CornerP(x,y,z,b), math.clamp(da / (da - db), 0f, 1f)); vertices.Add(p); colors.Add(C(p)); }
+            for (int i = 0; i < count; i++) { ushort edge = regularVertices[code * 12 + i]; int a = (edge >> 4) & 15, b = edge & 15; float da = CornerD(x,y,z,a), db = CornerD(x,y,z,b); float3 p = math.lerp(CornerP(x,y,z,a), CornerP(x,y,z,b), math.clamp(da / (da - db), 0f, 1f)); vertices.Add(p); colors.Add(C(p)); }
             for (int i = 0, n = regularTriangleIndexCount[code]; i < n; i += 3) { indices.Add(start + regularIndices[code * 36 + i]); indices.Add(start + regularIndices[code * 36 + i + 1]); indices.Add(start + regularIndices[code * 36 + i + 2]); }
         }
         // Transvoxel's 13-point cell joins a two-by-two fine face patch to its coarser representation.
@@ -95,7 +95,7 @@ namespace Humanier.Terrain
             {
                 float d0=FD(face,u,v), d1=FD(face,u+stride,v), d2=FD(face,u+span,v), d3=FD(face,u,v+stride), d4=FD(face,u+stride,v+stride), d5=FD(face,u+span,v+stride), d6=FD(face,u,v+span), d7=FD(face,u+stride,v+span), d8=FD(face,u+span,v+span);
                 int code=(d0<0?1:0)|(d1<0?2:0)|(d2<0?4:0)|(d5<0?8:0)|(d8<0?16:0)|(d7<0?32:0)|(d6<0?64:0)|(d3<0?128:0)|(d4<0?256:0), count=transitionVertexCount[code]; if(count==0) continue; int start=vertices.Length;
-                for(int i=0;i<count;i++){ushort edge=transitionVertices[code*12+i];int a=edge>>4,b=edge&15;float da=TD(a,d0,d1,d2,d3,d4,d5,d6,d7,d8),db=TD(b,d0,d1,d2,d3,d4,d5,d6,d7,d8);float3 p=math.lerp(TP(face,u,v,a),TP(face,u,v,b),math.clamp(da/(da-db),0f,1f));vertices.Add(p);colors.Add(C(p));}
+                for(int i=0;i<count;i++){ushort edge=transitionVertices[code*12+i];int a=(edge>>4)&15,b=edge&15;float da=TD(a,d0,d1,d2,d3,d4,d5,d6,d7,d8),db=TD(b,d0,d1,d2,d3,d4,d5,d6,d7,d8);float3 p=math.lerp(TP(face,u,v,a),TP(face,u,v,b),math.clamp(da/(da-db),0f,1f));vertices.Add(p);colors.Add(C(p));}
                 bool flip=transitionFlip[code] != 0; for(int i=0,n=transitionTriangleIndexCount[code];i<n;i+=3){int a=start+transitionIndices[code*36+i],b=start+transitionIndices[code*36+i+1],c=start+transitionIndices[code*36+i+2];indices.Add(a);indices.Add(flip?c:b);indices.Add(flip?b:c);}
             }
         }
