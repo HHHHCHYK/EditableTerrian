@@ -9,10 +9,12 @@ namespace Humanier.Terrain
         [SerializeField] private Camera playerCamera;
         [SerializeField, Range(.5f, 64f)] private float brushRadius = 2f;
         [SerializeField, Min(1f)] private float reach = 120f;
+        [SerializeField, Min(.02f)] private float continuousEditInterval = .12f;
         [SerializeField] private TerrainBrushMode mode = TerrainBrushMode.Dig;
         private LineRenderer preview;
         private TerrainRaycastHit hit;
         private bool hasHit;
+        private float nextEditTime;
 
         private void Awake()
         {
@@ -34,7 +36,11 @@ namespace Humanier.Terrain
             hasHit = terrain.TryRaycast(playerCamera.ScreenPointToRay(Input.mousePosition), reach, out hit);
             preview.enabled = hasHit;
             if (hasHit) UpdatePreview();
-            if (hasHit && Input.GetMouseButton(0)) terrain.RequestEdit(CreateRequest(hit.point));
+            if (hasHit && Input.GetMouseButton(0) && Time.unscaledTime >= nextEditTime)
+            {
+                terrain.RequestEdit(CreateRequest(hit.point));
+                nextEditTime = Time.unscaledTime + continuousEditInterval;
+            }
         }
         private TerrainEditRequest CreateRequest(Vector3 point)
         {

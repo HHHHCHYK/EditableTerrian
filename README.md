@@ -1,6 +1,6 @@
 # Humanier Destructible Terrain
 
-`com.humanier.terrain` is an embedded UPM package for continuous, editable terrain. It uses a deterministic signed-density field sampled in 32-cube chunks at a default 0.5 m cell size. Marching tetrahedra produces a smooth low-poly surface and allows caves, tunnels, overhangs, digging, filling, and flattening.
+`com.humanier.terrain` is an embedded UPM package for continuous, editable terrain. It uses a deterministic signed-density field sampled in 32-cube chunks at a default 0.5 m cell size. Burst-compiled Transvoxel mesh jobs produce a smooth low-poly surface and allow caves, tunnels, overhangs, digging, filling, and flattening.
 
 ## Use
 
@@ -12,4 +12,4 @@ For the included scene, run `Humanier > Terrain > Create Demo Scene` in the Unit
 
 ## Limits in 0.1.0
 
-The current package provides distance-based mesh decimation, incremental edit batching, bounded CPU chunk caching, and gzip session caching in `Application.temporaryCachePath`. Each `TerrainWorld` instance owns a unique cache namespace, so a fresh application session always regenerates the source world. Mesh LOD uses shared global density samples and is intended for low-poly visuals; a full Transvoxel transition-cell implementation remains the next rendering upgrade.
+The current package provides distance-based mesh decimation with Transvoxel transition cells, incremental edit batching, bounded CPU chunk caching, and gzip session caching in `Application.temporaryCachePath`. Each `TerrainWorld` instance owns a unique cache namespace, so a fresh application session always regenerates the source world.
