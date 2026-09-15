@@ -1,85 +1,112 @@
-using System.Collections.Generic;
+using System;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
+using Humanier.Terrain.Meshing;
 
 namespace Humanier.Terrain
 {
+    [Flags]
+    public enum TransitionFaceMask { None = 0, NegativeX = 1, PositiveX = 2, NegativeY = 4, PositiveY = 8, NegativeZ = 16, PositiveZ = 32 }
+
     internal static class TerrainMeshBuilder
     {
-        private static readonly int[,] Tetrahedra =
+        internal static TerrainMeshBuildRequest Schedule(TerrainChunkData data, Vector3 origin, int lod, TransitionFaceMask faces = TransitionFaceMask.None, int expectedVersion = -1)
         {
-            { 0, 5, 1, 6 }, { 0, 1, 2, 6 }, { 0, 2, 3, 6 },
-            { 0, 3, 7, 6 }, { 0, 7, 4, 6 }, { 0, 4, 5, 6 }
-        };
-        private static readonly int[,] Edges = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
-        private static readonly int[,] Corners = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 0, 0, 1 }, { 0, 1, 0 }, { 1, 1, 0 }, { 1, 1, 1 }, { 0, 1, 1 } };
-
-        public static Mesh Build(TerrainChunkData data, Vector3 origin, int lod)
-        {
-            int resolution = data.Resolution;
-            int stride = Mathf.Min(1 << Mathf.Clamp(lod, 0, 5), resolution);
-            var vertices = new List<Vector3>(); var triangles = new List<int>(); var colors = new List<Color>();
-            var p = new Vector3[8]; var d = new float[8]; var intersections = new Vector3[4];
-            for (int z = 0; z < resolution; z += stride)
-            for (int y = 0; y < resolution; y += stride)
-            for (int x = 0; x < resolution; x += stride)
-            {
-                FillCube(data, x, y, z, stride, p, d, origin);
-                bool hasSolid = false, hasAir = false;
-                for (int i = 0; i < 8; i++) { hasSolid |= d[i] > 0f; hasAir |= d[i] <= 0f; }
-                if (!hasSolid || !hasAir) continue;
-                for (int t = 0; t < 6; t++) PolygonizeTetra(data, origin, p, d, Tetrahedra[t, 0], Tetrahedra[t, 1], Tetrahedra[t, 2], Tetrahedra[t, 3], intersections, vertices, colors, triangles);
-            }
-            if (vertices.Count == 0) return null;
-            var mesh = new Mesh { indexFormat = vertices.Count > 65535 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16 };
-            mesh.SetVertices(vertices); mesh.SetColors(colors); mesh.SetTriangles(triangles, 0, true); mesh.RecalculateNormals(); mesh.RecalculateBounds();
-            return mesh;
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            if (expectedVersion >= 0 && expectedVersion != data.Version) throw new InvalidOperationException("Density data changed before meshing began.");
+            int stride = 1 << Mathf.Clamp(lod, 0, 3), samples = data.Density.Length, cells = data.Resolution / stride;
+            var density = new NativeArray<float>(samples, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            var materials = new NativeArray<byte>(samples, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            density.CopyFrom(data.Density); materials.CopyFrom(data.Material);
+            var tables = new TransvoxelTableSnapshot(Allocator.TempJob);
+            int capacity = math.max(16, cells * cells * cells * 12 + (data.Resolution / (stride * 2)) * (data.Resolution / (stride * 2)) * 12 * FaceCount(faces));
+            var vertices = new NativeList<float3>(capacity, Allocator.TempJob);
+            var colors = new NativeList<Color32>(capacity, Allocator.TempJob);
+            var indices = new NativeList<int>(capacity * 3, Allocator.TempJob);
+            var job = new TerrainMeshingJob { density = density, materials = materials,
+                regularVertexCount = tables.regularVertexCount, regularTriangleIndexCount = tables.regularTriangleIndexCount, regularVertices = tables.regularVertices, regularIndices = tables.regularIndices,
+                transitionVertexCount = tables.transitionVertexCount, transitionTriangleIndexCount = tables.transitionTriangleIndexCount, transitionVertices = tables.transitionVertices, transitionIndices = tables.transitionIndices, transitionFlip = tables.transitionFlip,
+                vertices = vertices, colors = colors, indices = indices,
+                resolution = data.Resolution, stride = stride, voxelSize = data.VoxelSize, offset = new float3(data.Id.x * data.Resolution * data.VoxelSize, data.Id.y * data.Resolution * data.VoxelSize, data.Id.z * data.Resolution * data.VoxelSize) - (float3)origin, faces = faces };
+            return new TerrainMeshBuildRequest(data.Version, job.Schedule(), density, materials, tables, vertices, colors, indices);
         }
 
-        private static void FillCube(TerrainChunkData data, int x, int y, int z, int stride, Vector3[] p, float[] d, Vector3 origin)
-        {
-            for (int i = 0; i < 8; i++)
-            {
-                int sx = x + Corners[i, 0] * stride, sy = y + Corners[i, 1] * stride, sz = z + Corners[i, 2] * stride;
-                p[i] = data.WorldPoint(sx, sy, sz) - origin; d[i] = data.GetDensity(sx, sy, sz);
-            }
-        }
+        internal static Mesh Build(TerrainChunkData data, Vector3 origin, int lod) => Build(data, origin, lod, TransitionFaceMask.None);
+        internal static Mesh Build(TerrainChunkData data, Vector3 origin, int lod, TransitionFaceMask faces) { using (var request = Schedule(data, origin, lod, faces, data.Version)) return request.Complete(); }
+        private static int FaceCount(TransitionFaceMask faces) { int n = 0; for (int i = 0; i < 6; i++) if (((int)faces & (1 << i)) != 0) n++; return n; }
+    }
 
-        private static void PolygonizeTetra(TerrainChunkData data, Vector3 origin, Vector3[] p, float[] d, int a, int b, int c, int e, Vector3[] intersections, List<Vector3> vertices, List<Color> colors, List<int> triangles)
+    internal sealed class TerrainMeshBuildRequest : IDisposable
+    {
+        private JobHandle handle; private NativeArray<float> density; private NativeArray<byte> materials; private TransvoxelTableSnapshot tables;
+        private NativeList<float3> vertices; private NativeList<Color32> colors; private NativeList<int> indices; private bool disposed;
+        internal int Version { get; } internal bool IsCompleted => handle.IsCompleted;
+        internal TerrainMeshBuildRequest(int version, JobHandle handle, NativeArray<float> density, NativeArray<byte> materials, TransvoxelTableSnapshot tables, NativeList<float3> vertices, NativeList<Color32> colors, NativeList<int> indices)
+        { Version = version; this.handle = handle; this.density = density; this.materials = materials; this.tables = tables; this.vertices = vertices; this.colors = colors; this.indices = indices; }
+        internal Mesh Complete()
         {
-            int count = 0;
-            for (int edge = 0; edge < 6; edge++)
+            if (disposed) throw new ObjectDisposedException(nameof(TerrainMeshBuildRequest));
+            handle.Complete(); if (vertices.Length == 0) return null;
+            var mesh = new Mesh { indexFormat = vertices.Length > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16 };
+            var output = new Vector3[vertices.Length]; for (int i = 0; i < output.Length; i++) output[i] = vertices[i];
+            mesh.vertices = output; mesh.SetColors(colors.AsArray()); mesh.SetIndices(indices.AsArray(), MeshTopology.Triangles, 0, true); mesh.RecalculateNormals(); mesh.RecalculateBounds(); return mesh;
+        }
+        public void Dispose()
+        {
+            if (disposed) return; handle.Complete(); if (density.IsCreated) density.Dispose(); if (materials.IsCreated) materials.Dispose(); tables.Dispose();
+            if (vertices.IsCreated) vertices.Dispose(); if (colors.IsCreated) colors.Dispose(); if (indices.IsCreated) indices.Dispose(); disposed = true;
+        }
+    }
+
+    [BurstCompile]
+    internal struct TerrainMeshingJob : IJob
+    {
+        [ReadOnly] internal NativeArray<float> density; [ReadOnly] internal NativeArray<byte> materials;
+        [ReadOnly] internal NativeArray<byte> regularVertexCount, regularTriangleIndexCount, regularIndices;
+        [ReadOnly] internal NativeArray<ushort> regularVertices;
+        [ReadOnly] internal NativeArray<byte> transitionVertexCount, transitionTriangleIndexCount, transitionIndices, transitionFlip;
+        [ReadOnly] internal NativeArray<ushort> transitionVertices;
+        internal NativeList<float3> vertices; internal NativeList<Color32> colors; internal NativeList<int> indices;
+        internal int resolution, stride; internal float voxelSize; internal float3 offset; internal TransitionFaceMask faces;
+        public void Execute()
+        {
+            for (int z = 0; z < resolution; z += stride) for (int y = 0; y < resolution; y += stride) for (int x = 0; x < resolution; x += stride) Regular(x, y, z);
+            if (stride == 1) return;
+            if ((faces & TransitionFaceMask.NegativeX) != 0) Transition(0); if ((faces & TransitionFaceMask.PositiveX) != 0) Transition(1);
+            if ((faces & TransitionFaceMask.NegativeY) != 0) Transition(2); if ((faces & TransitionFaceMask.PositiveY) != 0) Transition(3);
+            if ((faces & TransitionFaceMask.NegativeZ) != 0) Transition(4); if ((faces & TransitionFaceMask.PositiveZ) != 0) Transition(5);
+        }
+        private void Regular(int x, int y, int z)
+        {
+            int code = 0; for (int i = 0; i < 8; i++) if (D(x + ((i & 1) * stride), y + (((i >> 2) & 1) * stride), z + (((i >> 1) & 1) * stride)) < 0f) code |= 1 << i;
+            int count = regularVertexCount[code]; if (count == 0) return; int start = vertices.Length;
+            for (int i = 0; i < count; i++) { ushort edge = regularVertices[code * 12 + i]; int a = edge >> 4, b = edge & 15; float da = CornerD(x,y,z,a), db = CornerD(x,y,z,b); float3 p = math.lerp(CornerP(x,y,z,a), CornerP(x,y,z,b), math.clamp(da / (da - db), 0f, 1f)); vertices.Add(p); colors.Add(C(p)); }
+            for (int i = 0, n = regularTriangleIndexCount[code]; i < n; i += 3) { indices.Add(start + regularIndices[code * 36 + i]); indices.Add(start + regularIndices[code * 36 + i + 1]); indices.Add(start + regularIndices[code * 36 + i + 2]); }
+        }
+        // Transvoxel's 13-point cell joins a two-by-two fine face patch to its coarser representation.
+        private void Transition(int face)
+        {
+            int span = stride * 2;
+            for (int v = 0; v < resolution; v += span) for (int u = 0; u < resolution; u += span)
             {
-                int i = TetraIndex(a, b, c, e, Edges[edge, 0]), j = TetraIndex(a, b, c, e, Edges[edge, 1]);
-                if ((d[i] > 0f) == (d[j] > 0f)) continue;
-                float t = d[i] / (d[i] - d[j]); intersections[count++] = Vector3.Lerp(p[i], p[j], t);
-            }
-            if (count < 3) return;
-            Vector3 solidCenter = Vector3.zero; int solids = 0;
-            AddSolid(p, d, a, ref solidCenter, ref solids); AddSolid(p, d, b, ref solidCenter, ref solids); AddSolid(p, d, c, ref solidCenter, ref solids); AddSolid(p, d, e, ref solidCenter, ref solids);
-            if (solids > 0) solidCenter /= solids;
-            AddTriangle(intersections[0], intersections[1], intersections[2], solidCenter, data, origin, vertices, colors, triangles);
-            if (count == 4) AddTriangle(intersections[0], intersections[2], intersections[3], solidCenter, data, origin, vertices, colors, triangles);
-        }
-        private static int TetraIndex(int a, int b, int c, int d, int index) => index == 0 ? a : index == 1 ? b : index == 2 ? c : d;
-        private static void AddSolid(Vector3[] p, float[] d, int index, ref Vector3 center, ref int count) { if (d[index] > 0f) { center += p[index]; count++; } }
-        private static void AddTriangle(Vector3 a, Vector3 b, Vector3 c, Vector3 solidCenter, TerrainChunkData data, Vector3 origin, List<Vector3> vertices, List<Color> colors, List<int> triangles)
-        {
-            if (Vector3.Dot(Vector3.Cross(b - a, c - a), ((a + b + c) / 3f) - solidCenter) < 0f) { Vector3 swap = b; b = c; c = swap; }
-            int index = vertices.Count; vertices.Add(a); vertices.Add(b); vertices.Add(c);
-            Color color = ColorFor(data, (a + b + c) / 3f + origin); colors.Add(color); colors.Add(color); colors.Add(color);
-            triangles.Add(index); triangles.Add(index + 1); triangles.Add(index + 2);
-        }
-        private static Color ColorFor(TerrainChunkData data, Vector3 point)
-        {
-            int x = Mathf.Clamp(Mathf.RoundToInt(point.x / data.VoxelSize) - data.Id.x * data.Resolution, 0, data.Resolution);
-            int y = Mathf.Clamp(Mathf.RoundToInt(point.y / data.VoxelSize) - data.Id.y * data.Resolution, 0, data.Resolution);
-            int z = Mathf.Clamp(Mathf.RoundToInt(point.z / data.VoxelSize) - data.Id.z * data.Resolution, 0, data.Resolution);
-            switch (data.GetMaterial(x, y, z))
-            {
-                case 2: return new Color(.78f, .58f, .29f);
-                case 3: return new Color(.38f, .42f, .40f);
-                default: return new Color(.25f, .58f, .26f);
+                float d0=FD(face,u,v), d1=FD(face,u+stride,v), d2=FD(face,u+span,v), d3=FD(face,u,v+stride), d4=FD(face,u+stride,v+stride), d5=FD(face,u+span,v+stride), d6=FD(face,u,v+span), d7=FD(face,u+stride,v+span), d8=FD(face,u+span,v+span);
+                int code=(d0<0?1:0)|(d1<0?2:0)|(d2<0?4:0)|(d5<0?8:0)|(d8<0?16:0)|(d7<0?32:0)|(d6<0?64:0)|(d3<0?128:0)|(d4<0?256:0), count=transitionVertexCount[code]; if(count==0) continue; int start=vertices.Length;
+                for(int i=0;i<count;i++){ushort edge=transitionVertices[code*12+i];int a=edge>>4,b=edge&15;float da=TD(a,d0,d1,d2,d3,d4,d5,d6,d7,d8),db=TD(b,d0,d1,d2,d3,d4,d5,d6,d7,d8);float3 p=math.lerp(TP(face,u,v,a),TP(face,u,v,b),math.clamp(da/(da-db),0f,1f));vertices.Add(p);colors.Add(C(p));}
+                bool flip=transitionFlip[code] != 0; for(int i=0,n=transitionTriangleIndexCount[code];i<n;i+=3){int a=start+transitionIndices[code*36+i],b=start+transitionIndices[code*36+i+1],c=start+transitionIndices[code*36+i+2];indices.Add(a);indices.Add(flip?c:b);indices.Add(flip?b:c);}
             }
         }
+        private float TD(int i,float a,float b,float c,float d,float e,float f,float g,float h,float j){switch(i){case 0:return a;case 1:return b;case 2:return c;case 3:return d;case 4:return e;case 5:return f;case 6:return g;case 7:return h;case 8:return j;case 9:return a;case 10:return c;case 11:return g;default:return j;}}
+        private float3 TP(int face,int u,int v,int i){int x=(i==1||i==4||i==7||i==10)?stride:(i==2||i==5||i==8||i==12?2*stride:0),y=(i==3||i==4||i==5)?stride:(i==6||i==7||i==8||i==11||i==12?2*stride:0);return FP(face,u+x,v+y,i>=9?stride:0);}
+        private float FD(int face,int u,int v){int3 p=FG(face,u,v,0);return D(p.x,p.y,p.z);}
+        private float3 FP(int face,int u,int v,int depth)=>(float3)FG(face,u,v,depth)*voxelSize+offset;
+        private int3 FG(int face,int u,int v,int depth){switch(face){case 0:return new int3(depth,u,v);case 1:return new int3(resolution-depth,v,u);case 2:return new int3(v,depth,u);case 3:return new int3(u,resolution-depth,v);case 4:return new int3(u,v,depth);default:return new int3(v,u,resolution-depth);}}
+        private float3 CornerP(int x,int y,int z,int i)=>new float3(x+((i&1)*stride),y+(((i>>2)&1)*stride),z+(((i>>1)&1)*stride))*voxelSize+offset;
+        private float CornerD(int x,int y,int z,int i)=>D(x+((i&1)*stride),y+(((i>>2)&1)*stride),z+(((i>>1)&1)*stride));
+        private float D(int x,int y,int z)=>density[x+(resolution+1)*(y+(resolution+1)*z)];
+        private Color32 C(float3 p){int x=math.clamp((int)math.round((p.x-offset.x)/voxelSize),0,resolution),y=math.clamp((int)math.round((p.y-offset.y)/voxelSize),0,resolution),z=math.clamp((int)math.round((p.z-offset.z)/voxelSize),0,resolution);byte m=materials[x+(resolution+1)*(y+(resolution+1)*z)];return m==2?new Color32(199,148,74,255):m==3?new Color32(97,107,102,255):new Color32(64,148,66,255);}
     }
 }
