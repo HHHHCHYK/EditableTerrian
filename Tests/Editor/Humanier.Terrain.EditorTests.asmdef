@@ -1,7 +1,7 @@
 {
   "name": "Humanier.Terrain.EditorTests",
   "rootNamespace": "Humanier.Terrain.Tests",
-  "references": ["Humanier.Terrain.Runtime", "UnityEngine.TestRunner", "UnityEditor.TestRunner"],
+  "references": ["Humanier.Terrain.Runtime"],
   "includePlatforms": ["Editor"],
   "optionalUnityReferences": ["TestAssemblies"]
 }
