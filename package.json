@@ -1,0 +1,12 @@
+{
+  "name": "com.humanier.terrain",
+  "version": "0.1.0",
+  "displayName": "Humanier Destructible Terrain",
+  "description": "Streaming, editable density-field terrain for Unity.",
+  "unity": "6000.0",
+  "license": "MIT",
+  "keywords": ["terrain", "voxel", "procedural", "destructible"],
+  "samples": [
+    { "displayName": "Terrain Demo", "description": "Interactive editable terrain scene helpers.", "path": "Samples~/TerrainDemo" }
+  ]
+}

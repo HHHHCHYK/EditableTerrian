@@ -1,0 +1,14 @@
+{
+  "name": "Humanier.Terrain.Runtime",
+  "rootNamespace": "Humanier.Terrain",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
