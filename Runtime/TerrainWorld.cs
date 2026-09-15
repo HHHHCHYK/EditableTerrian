@@ -399,6 +399,7 @@ namespace Humanier.Terrain
             if (chunk.pendingMesh != null) { chunk.pendingMesh.Dispose(); activeMeshBuilds--; }
             if (chunk.filter.sharedMesh != null) Destroy(chunk.filter.sharedMesh);
             Destroy(chunk.gameObject);
+            RefreshNeighbours(id);
         }
 
         private TerrainChunkId FindFurthestChunk(Vector3 priorityCenter, out LoadedChunk furthestChunk) => FindFurthestChunk(priorityCenter, out furthestChunk, out _);

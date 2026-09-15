@@ -1,7 +1,11 @@
 {
   "name": "Humanier.Terrain.Runtime",
   "rootNamespace": "Humanier.Terrain",
-  "references": [],
+  "references": [
+    "Unity.Burst",
+    "Unity.Collections",
+    "Unity.Mathematics"
+  ],
   "includePlatforms": [],
   "excludePlatforms": [],
   "allowUnsafeCode": false,
