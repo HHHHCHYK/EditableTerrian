@@ -36,6 +36,7 @@ namespace Humanier.Terrain
         public bool TryLoad(TerrainChunkData data)
         {
             string target = Path.Combine(directory, $"{data.Id.x}_{data.Id.y}_{data.Id.z}.bin");
+            LastError = null;
             if (!File.Exists(target)) return false;
             try
             {
@@ -43,9 +44,10 @@ namespace Humanier.Terrain
                 using (var gzip = new GZipStream(file, CompressionMode.Decompress))
                 using (var reader = new BinaryReader(gzip))
                 {
-                    int count = reader.ReadInt32(); if (count != data.Density.Length) return false;
+                    int count = reader.ReadInt32(); if (count != data.Density.Length) { LastError = "Cached density resolution does not match this terrain world."; return false; }
                     var density = new float[count]; for (int i = 0; i < count; i++) density[i] = reader.ReadSingle();
-                    int materials = reader.ReadInt32(); var material = reader.ReadBytes(materials);
+                    int materials = reader.ReadInt32(); if (materials != data.Material.Length) { LastError = "Cached material resolution does not match this terrain world."; return false; }
+                    var material = reader.ReadBytes(materials); if (material.Length != materials) { LastError = "Cached material data is truncated."; return false; }
                     data.Restore(density, material); return true;
                 }
             }

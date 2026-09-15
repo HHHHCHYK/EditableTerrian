@@ -5,6 +5,11 @@
   "description": "Streaming, editable density-field terrain for Unity.",
   "unity": "6000.0",
   "license": "MIT",
+  "dependencies": {
+    "com.unity.burst": "1.8.24",
+    "com.unity.collections": "2.4.3",
+    "com.unity.mathematics": "1.3.2"
+  },
   "keywords": ["terrain", "voxel", "procedural", "destructible"],
   "samples": [
     { "displayName": "Terrain Demo", "description": "Interactive editable terrain scene helpers.", "path": "Samples~/TerrainDemo" }

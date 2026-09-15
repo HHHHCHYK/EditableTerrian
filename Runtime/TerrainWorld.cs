@@ -38,6 +38,7 @@ namespace Humanier.Terrain
             public MeshCollider collider;
             public int lod;
             public int lastAccessFrame;
+            public TerrainMeshBuildRequest pendingMesh;
         }
         private struct PendingEdit
         {
@@ -63,6 +64,7 @@ namespace Humanier.Terrain
 
         private void Update()
         {
+            ApplyCompletedMeshes();
             if (focus != null && !cacheWriteBlocked) QueueChunksNear(focus.position + originOffset);
             int buildCount = Settings.chunksBuiltPerFrame;
             while (buildCount-- > 0 && requestedChunks.Count > 0)
@@ -75,7 +77,11 @@ namespace Humanier.Terrain
 
         private void OnDestroy()
         {
-            foreach (LoadedChunk chunk in chunks.Values) if (chunk.filter != null && chunk.filter.sharedMesh != null) Destroy(chunk.filter.sharedMesh);
+            foreach (LoadedChunk chunk in chunks.Values)
+            {
+                chunk.pendingMesh?.Dispose();
+                if (chunk.filter != null && chunk.filter.sharedMesh != null) Destroy(chunk.filter.sharedMesh);
+            }
             if (generatedSettings != null) Destroy(generatedSettings);
             if (generatedMaterial != null) Destroy(generatedMaterial);
         }
@@ -182,7 +188,12 @@ namespace Humanier.Terrain
         }
         private void CreateChunk(TerrainChunkId id)
         {
-            var data = new TerrainChunkData(Settings, id); cache.TryLoad(data);
+            var data = new TerrainChunkData(Settings, id);
+            if (!cache.TryLoad(data) && !string.IsNullOrEmpty(cache.LastError))
+            {
+                cacheWriteBlocked = true;
+                CacheWriteFailed?.Invoke($"Could not read terrain session cache: {cache.LastError}");
+            }
             var go = new GameObject($"Terrain {id}"); go.transform.SetParent(transform, false);
             var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>(), lod = GetLod(id), lastAccessFrame = frameCounter };
             go.AddComponent<MeshRenderer>().sharedMaterial = Settings.terrainMaterial != null ? Settings.terrainMaterial : generatedMaterial;
@@ -192,7 +203,25 @@ namespace Humanier.Terrain
         }
         private void RebuildChunk(LoadedChunk chunk)
         {
-            Mesh next = TerrainMeshBuilder.Build(chunk.data, originOffset, chunk.lod);
+            chunk.pendingMesh?.Dispose();
+            chunk.pendingMesh = TerrainMeshBuilder.Schedule(chunk.data, originOffset, chunk.lod, GetTransitionFaces(chunk.data.Id, chunk.lod), chunk.data.Version);
+        }
+        private void ApplyCompletedMeshes()
+        {
+            foreach (LoadedChunk chunk in chunks.Values)
+            {
+                if (chunk.pendingMesh == null || !chunk.pendingMesh.IsCompleted) continue;
+                TerrainMeshBuildRequest request = chunk.pendingMesh;
+                chunk.pendingMesh = null;
+                Mesh next = request.Complete();
+                bool current = request.Version == chunk.data.Version;
+                request.Dispose();
+                if (!current) { if (next != null) Destroy(next); continue; }
+                AssignMesh(chunk, next);
+            }
+        }
+        private static void AssignMesh(LoadedChunk chunk, Mesh next)
+        {
             Mesh old = chunk.filter.sharedMesh;
             chunk.filter.sharedMesh = next;
             if (chunk.collider != null) chunk.collider.sharedMesh = next;
@@ -229,7 +258,7 @@ namespace Humanier.Terrain
                     remove.Add(pair.Key); continue;
                 }
                 int lod = GetLod(pair.Key);
-                if (lod != chunk.lod) { chunk.lod = lod; RebuildChunk(chunk); }
+                if (lod != chunk.lod) { chunk.lod = lod; RebuildChunk(chunk); RefreshNeighbours(pair.Key); }
                 chunk.lastAccessFrame = frameCounter;
             }
             foreach (TerrainChunkId id in remove) RemoveChunk(id);
@@ -263,8 +292,35 @@ namespace Humanier.Terrain
         {
             if (!chunks.TryGetValue(id, out LoadedChunk chunk)) return;
             chunks.Remove(id);
+            chunk.pendingMesh?.Dispose();
             if (chunk.filter.sharedMesh != null) Destroy(chunk.filter.sharedMesh);
             Destroy(chunk.gameObject);
+        }
+
+        private TransitionFaceMask GetTransitionFaces(TerrainChunkId id, int lod)
+        {
+            TransitionFaceMask mask = TransitionFaceMask.None;
+            AddTransition(ref mask, new TerrainChunkId(id.x - 1, id.y, id.z), lod, TransitionFaceMask.NegativeX);
+            AddTransition(ref mask, new TerrainChunkId(id.x + 1, id.y, id.z), lod, TransitionFaceMask.PositiveX);
+            AddTransition(ref mask, new TerrainChunkId(id.x, id.y - 1, id.z), lod, TransitionFaceMask.NegativeY);
+            AddTransition(ref mask, new TerrainChunkId(id.x, id.y + 1, id.z), lod, TransitionFaceMask.PositiveY);
+            AddTransition(ref mask, new TerrainChunkId(id.x, id.y, id.z - 1), lod, TransitionFaceMask.NegativeZ);
+            AddTransition(ref mask, new TerrainChunkId(id.x, id.y, id.z + 1), lod, TransitionFaceMask.PositiveZ);
+            return mask;
+        }
+        private void AddTransition(ref TransitionFaceMask mask, TerrainChunkId neighbour, int lod, TransitionFaceMask face)
+        {
+            if (chunks.TryGetValue(neighbour, out LoadedChunk adjacent) && adjacent.lod == lod + 1) mask |= face;
+        }
+        private void RefreshNeighbours(TerrainChunkId id)
+        {
+            RefreshAdjacent(new TerrainChunkId(id.x - 1, id.y, id.z)); RefreshAdjacent(new TerrainChunkId(id.x + 1, id.y, id.z));
+            RefreshAdjacent(new TerrainChunkId(id.x, id.y - 1, id.z)); RefreshAdjacent(new TerrainChunkId(id.x, id.y + 1, id.z));
+            RefreshAdjacent(new TerrainChunkId(id.x, id.y, id.z - 1)); RefreshAdjacent(new TerrainChunkId(id.x, id.y, id.z + 1));
+        }
+        private void RefreshAdjacent(TerrainChunkId id)
+        {
+            if (chunks.TryGetValue(id, out LoadedChunk adjacent)) RebuildChunk(adjacent);
         }
     }
 
