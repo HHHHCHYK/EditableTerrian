@@ -1,6 +1,6 @@
 {
   "name": "com.humanier.terrain",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "displayName": "Humanier Destructible Terrain",
   "description": "Streaming, editable density-field terrain for Unity.",
   "unity": "6000.0",
@@ -8,7 +8,9 @@
   "dependencies": {
     "com.unity.burst": "1.8.24",
     "com.unity.collections": "2.4.3",
-    "com.unity.mathematics": "1.3.2"
+    "com.unity.mathematics": "1.3.2",
+    "com.unity.inputsystem": "1.19.0",
+    "com.unity.render-pipelines.universal": "17.3.0"
   },
   "keywords": ["terrain", "voxel", "procedural", "destructible"],
   "samples": [

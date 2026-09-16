@@ -3,6 +3,18 @@ using UnityEngine;
 
 namespace Humanier.Terrain
 {
+    internal readonly struct TerrainSurfaceRange
+    {
+        public readonly float MinHeight;
+        public readonly float MaxHeight;
+
+        public TerrainSurfaceRange(float minHeight, float maxHeight)
+        {
+            MinHeight = minHeight;
+            MaxHeight = maxHeight;
+        }
+    }
+
     internal readonly struct TerrainColumnSample
     {
         public readonly float SurfaceHeight;
@@ -33,6 +45,48 @@ namespace Humanier.Terrain
     public static class TerrainGenerator
     {
         private static readonly Dictionary<int, FastNoiseLite> Noises = new Dictionary<int, FastNoiseLite>();
+        private const int SurfaceRangeCacheCapacity = 2048;
+        private static readonly Dictionary<SurfaceRangeKey, TerrainSurfaceRange> SurfaceRanges = new Dictionary<SurfaceRangeKey, TerrainSurfaceRange>();
+        private static readonly Queue<SurfaceRangeKey> SurfaceRangeOrder = new Queue<SurfaceRangeKey>();
+
+        private struct SurfaceRangeKey : System.IEquatable<SurfaceRangeKey>
+        {
+            private readonly int seed;
+            private readonly int resolution;
+            private readonly int voxelSizeBits;
+            private readonly int settingsHash;
+            private readonly int x;
+            private readonly int z;
+
+            public SurfaceRangeKey(TerrainWorldSettings settings, TerrainChunkId id)
+            {
+                seed = settings.seed;
+                resolution = settings.chunkResolution;
+                voxelSizeBits = settings.voxelSize.GetHashCode();
+                settingsHash = SurfaceSettingsHash(settings);
+                x = id.x;
+                z = id.z;
+            }
+
+            public bool Equals(SurfaceRangeKey other) => seed == other.seed && resolution == other.resolution && voxelSizeBits == other.voxelSizeBits && settingsHash == other.settingsHash && x == other.x && z == other.z;
+            public override bool Equals(object obj) => obj is SurfaceRangeKey other && Equals(other);
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int hash = seed;
+                    hash = hash * 397 ^ resolution;
+                    hash = hash * 397 ^ voxelSizeBits;
+                    hash = hash * 397 ^ settingsHash;
+                    hash = hash * 397 ^ x;
+                    return hash * 397 ^ z;
+                }
+            }
+        }
+
+        internal static int SurfaceRangeCacheCount => SurfaceRanges.Count;
+        internal static int SurfaceRangeCacheLimit => SurfaceRangeCacheCapacity;
+
         public static TerrainBiome SampleBiome(int seed, float x, float z)
         {
             GetBiomeWeights(seed, x, z, out float grassland, out float desert, out float mountains);
@@ -77,6 +131,44 @@ namespace Humanier.Terrain
         }
 
         public static byte SurfaceMaterialAt(TerrainWorldSettings settings, float x, float z) => settings.GetBiomeDefinition(SampleBiome(settings.seed, x, z)).surfaceMaterial;
+
+        internal static TerrainSurfaceRange SurfaceRange(TerrainWorldSettings settings, TerrainChunkId id)
+        {
+            var key = new SurfaceRangeKey(settings, id);
+            if (SurfaceRanges.TryGetValue(key, out TerrainSurfaceRange cached)) return cached;
+
+            float min = float.MaxValue;
+            float max = float.MinValue;
+            int resolution = settings.chunkResolution;
+            for (int z = 0; z <= resolution; z++)
+            for (int x = 0; x <= resolution; x++)
+            {
+                float worldX = (id.x * resolution + x) * settings.voxelSize;
+                float worldZ = (id.z * resolution + z) * settings.voxelSize;
+                float surface = CalculateSurfaceHeight(settings, worldX, worldZ, out _);
+                min = Mathf.Min(min, surface);
+                max = Mathf.Max(max, surface);
+            }
+
+            var range = new TerrainSurfaceRange(min, max);
+            if (SurfaceRanges.Count >= SurfaceRangeCacheCapacity)
+            {
+                SurfaceRangeKey oldest = SurfaceRangeOrder.Dequeue();
+                SurfaceRanges.Remove(oldest);
+            }
+            SurfaceRanges[key] = range;
+            SurfaceRangeOrder.Enqueue(key);
+            return range;
+        }
+
+        internal static TerrainSurfaceRange SurfaceHeightRange(TerrainWorldSettings settings, TerrainChunkId id) => SurfaceRange(settings, id);
+
+        internal static void GetSurfaceHeightRange(TerrainWorldSettings settings, TerrainChunkId id, out float minHeight, out float maxHeight)
+        {
+            TerrainSurfaceRange range = SurfaceRange(settings, id);
+            minHeight = range.MinHeight;
+            maxHeight = range.MaxHeight;
+        }
 
         internal static TerrainColumnSample SampleColumn(TerrainWorldSettings settings, float x, float z)
         {
@@ -135,5 +227,29 @@ namespace Humanier.Terrain
             return (noise.GetNoise(x, z) + 1f) * .5f;
         }
         private static float Smooth01(float t) { t = Mathf.Clamp01(t); return t * t * (3f - 2f * t); }
+
+        private static int SurfaceSettingsHash(TerrainWorldSettings settings)
+        {
+            unchecked
+            {
+                int hash = settings.seed;
+                hash = hash * 397 ^ settings.chunkResolution;
+                hash = hash * 397 ^ settings.voxelSize.GetHashCode();
+                hash = hash * 397 ^ BiomeHeightHash(settings.grassland);
+                hash = hash * 397 ^ BiomeHeightHash(settings.desert);
+                return hash * 397 ^ BiomeHeightHash(settings.rockyMountains);
+            }
+        }
+
+        private static int BiomeHeightHash(TerrainBiomeDefinition definition)
+        {
+            if (definition == null) return 0;
+            unchecked
+            {
+                int hash = definition.broadAmplitude.GetHashCode();
+                hash = hash * 397 ^ definition.detailAmplitude.GetHashCode();
+                return hash * 397 ^ definition.mountainAmplitude.GetHashCode();
+            }
+        }
     }
 }

@@ -84,6 +84,8 @@ namespace Humanier.Terrain.Tests
         [Test]
         public void StreamingPlanStaysWithinConfiguredDensityCapacity()
         {
+            settings.viewDistance = settings.ChunkSize * 2f;
+            settings.nearUndergroundDistance = settings.ChunkSize;
             var worldObject = new GameObject("Terrain streaming plan");
             var world = worldObject.AddComponent<TerrainWorld>();
             Invoke(world, "BuildStreamingPlan", new TerrainChunkId(0, 0, 0));
@@ -97,13 +99,73 @@ namespace Humanier.Terrain.Tests
         {
             Vector2Int column = FindNegativeSurfaceColumn();
             float surface = TerrainGenerator.SurfaceHeight(settings, column.x, column.y);
+            int columnX = Mathf.FloorToInt(column.x / settings.ChunkSize);
+            int columnZ = Mathf.FloorToInt(column.y / settings.ChunkSize);
+            settings.viewDistance = settings.ChunkSize * 2f;
+            settings.nearUndergroundDistance = settings.ChunkSize;
             var worldObject = new GameObject("Terrain surface streaming plan");
             var world = worldObject.AddComponent<TerrainWorld>();
             SetField(world, "settings", settings);
-            Invoke(world, "BuildStreamingPlan", new TerrainChunkId(0, 1, 0));
+            Invoke(world, "BuildStreamingPlan", new TerrainChunkId(columnX, 1, columnZ));
             var plan = (System.Collections.IEnumerable)GetField(world, "streamingPlan");
-            var surfaceId = new TerrainChunkId(Mathf.FloorToInt(column.x / settings.ChunkSize), Mathf.FloorToInt(surface / settings.ChunkSize), Mathf.FloorToInt(column.y / settings.ChunkSize));
+            var surfaceId = new TerrainChunkId(columnX, Mathf.FloorToInt(surface / settings.ChunkSize), columnZ);
             Assert.IsTrue(ContainsChunk(plan, surfaceId));
+            Object.DestroyImmediate(worldObject);
+        }
+        [Test]
+        public void SurfaceRangeCoversEveryVoxelColumnWithBoundarySafety()
+        {
+            var id = new TerrainChunkId(3, 0, -2);
+            TerrainSurfaceRange range = TerrainGenerator.SurfaceRange(settings, id);
+            float safety = settings.voxelSize;
+            int minY = Mathf.FloorToInt((range.MinHeight - safety) / settings.ChunkSize);
+            int maxY = Mathf.FloorToInt((range.MaxHeight + safety) / settings.ChunkSize);
+
+            for (int z = 0; z <= settings.chunkResolution; z++)
+            for (int x = 0; x <= settings.chunkResolution; x++)
+            {
+                float worldX = (id.x * settings.chunkResolution + x) * settings.voxelSize;
+                float worldZ = (id.z * settings.chunkResolution + z) * settings.voxelSize;
+                float height = TerrainGenerator.SurfaceHeight(settings, worldX, worldZ);
+                Assert.GreaterOrEqual(height, minY * settings.ChunkSize - safety);
+                Assert.LessOrEqual(height, (maxY + 1) * settings.ChunkSize + safety);
+            }
+        }
+        [Test]
+        public void MovingFocusDropsQueuedChunksFromThePreviousStreamingPlan()
+        {
+            var worldObject = new GameObject("Terrain streaming queue reset");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "settings", settings);
+            Invoke(world, "UpdateStreamingPlan", Vector3.zero);
+            var beforeMove = (System.Collections.ICollection)GetField(world, "requestedChunks");
+            Assert.That(beforeMove.Count, Is.GreaterThan(0));
+
+            int destinationChunkX = 20;
+            Invoke(world, "UpdateStreamingPlan", new Vector3(destinationChunkX * settings.ChunkSize, 0f, 0f));
+            foreach (TerrainChunkId id in (System.Collections.IEnumerable)GetField(world, "requestedChunks"))
+                Assert.GreaterOrEqual(id.x, destinationChunkX - Mathf.CeilToInt(settings.viewDistance / settings.ChunkSize));
+            Object.DestroyImmediate(worldObject);
+        }
+        [Test]
+        public void SuspendingWorldClearsStreamingPlanSoResumeRebuildsItAtTheCurrentFocus()
+        {
+            settings.viewDistance = settings.ChunkSize * 2f;
+            settings.nearUndergroundDistance = settings.ChunkSize;
+            var worldObject = new GameObject("Terrain streaming resume");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "settings", settings);
+            SetField(world, "initialized", true);
+            Invoke(world, "UpdateStreamingPlan", Vector3.zero);
+            Assert.IsTrue((bool)GetField(world, "hasStreamingPlan"));
+
+            Invoke(world, "SuspendRuntime", "test suspension");
+            Assert.IsFalse((bool)GetField(world, "hasStreamingPlan"));
+            Invoke(world, "OnEnable");
+            Invoke(world, "UpdateStreamingPlan", Vector3.zero);
+
+            Assert.IsTrue((bool)GetField(world, "hasStreamingPlan"));
+            Assert.That(((System.Collections.ICollection)GetField(world, "requestedChunks")).Count, Is.GreaterThan(0));
             Object.DestroyImmediate(worldObject);
         }
         [Test]
@@ -153,6 +215,32 @@ namespace Humanier.Terrain.Tests
             Assert.IsFalse(newSession.TryLoad(new TerrainChunkData(settings, id)));
         }
         [Test]
+        public void AuthoritativeDensityQueryReadsAnUnloadedModifiedChunkFromSessionCache()
+        {
+            float height = TerrainGenerator.SurfaceHeight(settings, 0f, 0f);
+            Vector3 point = new Vector3(0f, height - .5f, 0f);
+            var id = new TerrainChunkId(
+                Mathf.FloorToInt(point.x / settings.ChunkSize),
+                Mathf.FloorToInt(point.y / settings.ChunkSize),
+                Mathf.FloorToInt(point.z / settings.ChunkSize));
+            var edited = new TerrainChunkData(settings, id);
+            Assert.IsTrue(edited.Apply(settings, TerrainEditRequest.Dig(point, 2f)));
+            float expected = edited.SampleDensity(point);
+            string session = System.Guid.NewGuid().ToString("N");
+            var cache = new TerrainSessionCache(settings.seed, session);
+            Assert.IsTrue(cache.Save(edited));
+
+            var worldObject = new GameObject("Terrain cached density query");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "settings", settings);
+            SetField(world, "cache", cache);
+
+            Assert.IsTrue(world.TrySampleDensity(point, out float actual));
+            Assert.AreEqual(expected, actual);
+            Assert.AreEqual(TerrainGenerator.InitialDensity(settings, point), world.SampleGeneratedDensity(point));
+            Object.DestroyImmediate(worldObject);
+        }
+        [Test]
         public void CorruptSessionCacheReportsAnError()
         {
             string session = System.Guid.NewGuid().ToString("N");
@@ -162,6 +250,21 @@ namespace Humanier.Terrain.Tests
             var cache = new TerrainSessionCache(settings.seed, session);
             Assert.IsFalse(cache.TryLoad(new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0))));
             Assert.IsNotEmpty(cache.LastError);
+        }
+        [Test]
+        public void DiscardingAnInvalidSessionCacheAllowsGenerationToContinue()
+        {
+            string session = System.Guid.NewGuid().ToString("N");
+            string directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain", settings.seed.ToString(), session);
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "0_0_0.bin"), "not a gzip terrain cache");
+            var cache = new TerrainSessionCache(settings.seed, session);
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+
+            Assert.IsFalse(cache.TryLoad(data));
+            Assert.IsTrue(cache.TryDiscard(data.Id));
+            Assert.IsFalse(cache.TryLoad(data));
+            Assert.IsNull(cache.LastError);
         }
 
         private static GameObject CreateRaycastChunk(string name, Vector3 position, TerrainWorld owner)
@@ -180,7 +283,7 @@ namespace Humanier.Terrain.Tests
         {
             for (int z = -240; z <= 240; z += 16)
             for (int x = -240; x <= 240; x += 16)
-                if (TerrainGenerator.SurfaceHeight(settings, x + 8f, z + 8f) < 0f) return new Vector2Int(x + 8, z + 8);
+                if (x * x + z * z <= 256 * 256 && TerrainGenerator.SurfaceHeight(settings, x + 8f, z + 8f) < 0f) return new Vector2Int(x + 8, z + 8);
             Assert.Fail("Test seed did not produce a negative terrain surface in the streaming area.");
             return default;
         }

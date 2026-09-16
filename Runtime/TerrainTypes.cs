@@ -41,6 +41,10 @@ namespace Humanier.Terrain
 
     public sealed class TerrainEditHandle
     {
+        // Completed means the edited density is committed. Every affected chunk
+        // still resident has its current mesh applied; unloaded chunks are saved
+        // and rebuild when streaming loads them again. When collision generation
+        // is enabled, resident meshes are also assigned to their MeshColliders.
         public TerrainEditStatus Status { get; internal set; } = TerrainEditStatus.Queued;
         public float Progress { get; internal set; }
         public string Error { get; internal set; }

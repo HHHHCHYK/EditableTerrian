@@ -1,4 +1,5 @@
 using Unity.Collections;
+using Unity.Mathematics;
 
 namespace Humanier.Terrain.Meshing
 {
@@ -14,6 +15,7 @@ namespace Humanier.Terrain.Meshing
         internal NativeArray<byte> transitionFlip;
         internal NativeArray<ushort> transitionVertices;
         internal NativeArray<byte> transitionIndices;
+        internal NativeArray<int2> transitionCornerOffsets;
 
         internal TransvoxelTableSnapshot(Allocator allocator)
         {
@@ -26,6 +28,7 @@ namespace Humanier.Terrain.Meshing
             transitionFlip = new NativeArray<byte>(512, allocator);
             transitionVertices = new NativeArray<ushort>(512 * 12, allocator);
             transitionIndices = new NativeArray<byte>(512 * 36, allocator);
+            transitionCornerOffsets = new NativeArray<int2>(13, allocator);
             CopyRegular();
             CopyTransitions();
         }
@@ -46,6 +49,11 @@ namespace Humanier.Terrain.Meshing
 
         private void CopyTransitions()
         {
+            for (int i = 0; i < transitionCornerOffsets.Length; i++)
+            {
+                UnityEngine.Vector3Int offset = TransvoxelTables.TransitionCornerOffset[i];
+                transitionCornerOffsets[i] = new int2(offset.x, offset.y);
+            }
             for (int code = 0; code < 512; code++)
             {
                 RegularCellData cell = TransvoxelTables.TransitionRegularCellData[TransvoxelTables.TransitionCellClass[code] & 0x7f];
@@ -70,6 +78,7 @@ namespace Humanier.Terrain.Meshing
             if (transitionFlip.IsCreated) transitionFlip.Dispose();
             if (transitionVertices.IsCreated) transitionVertices.Dispose();
             if (transitionIndices.IsCreated) transitionIndices.Dispose();
+            if (transitionCornerOffsets.IsCreated) transitionCornerOffsets.Dispose();
         }
     }
 }

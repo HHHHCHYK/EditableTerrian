@@ -6,6 +6,7 @@ Shader "Humanier/Terrain Low Poly"
         Tags { "RenderPipeline"="UniversalPipeline" "RenderType"="Opaque" "Queue"="Geometry" }
         Pass
         {
+            Cull Back
             HLSLPROGRAM
             #pragma vertex Vert
             #pragma fragment Frag

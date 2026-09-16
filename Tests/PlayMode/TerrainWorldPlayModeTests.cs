@@ -22,6 +22,7 @@ namespace Humanier.Terrain.Tests
 
             Assert.AreEqual(TerrainEditStatus.Completed, edit.Status);
             Assert.Less(world.SampleDensity(point), before);
+            Assert.IsTrue(world.IsCollisionReady(point), "Completed edits must have their current collision mesh assigned.");
             Object.Destroy(worldObject);
         }
 
@@ -37,6 +38,28 @@ namespace Humanier.Terrain.Tests
             yield return null;
 
             Assert.AreEqual(TerrainEditStatus.Cancelled, edit.Status);
+        }
+
+        [UnityTest]
+        public IEnumerator DisablingWorldCancelsActiveEditsAndAllowsLaterEditsAfterReenable()
+        {
+            var worldObject = new GameObject("Terrain disable lifecycle test");
+            var world = worldObject.AddComponent<TerrainWorld>();
+            yield return null;
+
+            TerrainEditHandle cancelled = world.RequestEdit(TerrainEditRequest.Dig(Vector3.zero, 64f));
+            worldObject.SetActive(false);
+            yield return null;
+            Assert.AreEqual(TerrainEditStatus.Cancelled, cancelled.Status);
+
+            worldObject.SetActive(true);
+            yield return null;
+            float height = world.SampleSurfaceHeight(Vector3.zero);
+            TerrainEditHandle resumed = world.RequestEdit(TerrainEditRequest.Dig(new Vector3(0f, height - .5f, 0f), 2f));
+            while (resumed.Status == TerrainEditStatus.Queued || resumed.Status == TerrainEditStatus.Processing) yield return null;
+
+            Assert.AreEqual(TerrainEditStatus.Completed, resumed.Status);
+            Object.Destroy(worldObject);
         }
     }
 }

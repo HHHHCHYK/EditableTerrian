@@ -1,4 +1,7 @@
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 
 namespace Humanier.Terrain
 {
@@ -29,18 +32,45 @@ namespace Humanier.Terrain
         private void Update()
         {
             if (terrain == null || playerCamera == null) return;
-            if (Input.GetKeyDown(KeyCode.Alpha1)) mode = TerrainBrushMode.Dig;
-            if (Input.GetKeyDown(KeyCode.Alpha2)) mode = TerrainBrushMode.Fill;
-            if (Input.GetKeyDown(KeyCode.Alpha3)) mode = TerrainBrushMode.Flatten;
-            brushRadius = Mathf.Clamp(brushRadius + Input.mouseScrollDelta.y * Mathf.Max(.25f, brushRadius * .1f), .5f, 64f);
-            hasHit = terrain.TryRaycast(playerCamera.ScreenPointToRay(Input.mousePosition), reach, out hit);
+            if (DigitPressed(1)) mode = TerrainBrushMode.Dig;
+            if (DigitPressed(2)) mode = TerrainBrushMode.Fill;
+            if (DigitPressed(3)) mode = TerrainBrushMode.Flatten;
+            if (!TryGetPointer(out Vector2 pointer, out float scroll, out bool primaryPressed)) { preview.enabled = false; return; }
+            brushRadius = Mathf.Clamp(brushRadius + scroll * Mathf.Max(.25f, brushRadius * .1f), .5f, 64f);
+            hasHit = terrain.TryRaycast(playerCamera.ScreenPointToRay(pointer), reach, out hit);
             preview.enabled = hasHit;
             if (hasHit) UpdatePreview();
-            if (hasHit && Input.GetMouseButton(0) && Time.unscaledTime >= nextEditTime)
+            if (hasHit && primaryPressed && Time.unscaledTime >= nextEditTime)
             {
                 terrain.RequestEdit(CreateRequest(hit.point));
                 nextEditTime = Time.unscaledTime + continuousEditInterval;
             }
+        }
+        private static bool DigitPressed(int digit)
+        {
+#if ENABLE_INPUT_SYSTEM
+            Keyboard keyboard = Keyboard.current;
+            if (keyboard == null) return false;
+            return digit == 1 ? keyboard.digit1Key.wasPressedThisFrame : digit == 2 ? keyboard.digit2Key.wasPressedThisFrame : keyboard.digit3Key.wasPressedThisFrame;
+#else
+            return Input.GetKeyDown(digit == 1 ? KeyCode.Alpha1 : digit == 2 ? KeyCode.Alpha2 : KeyCode.Alpha3);
+#endif
+        }
+        private static bool TryGetPointer(out Vector2 position, out float scroll, out bool primaryPressed)
+        {
+#if ENABLE_INPUT_SYSTEM
+            Mouse mouse = Mouse.current;
+            if (mouse == null) { position = default; scroll = 0f; primaryPressed = false; return false; }
+            position = mouse.position.ReadValue();
+            scroll = mouse.scroll.ReadValue().y;
+            primaryPressed = mouse.leftButton.isPressed;
+            return true;
+#else
+            position = Input.mousePosition;
+            scroll = Input.mouseScrollDelta.y;
+            primaryPressed = Input.GetMouseButton(0);
+            return true;
+#endif
         }
         private TerrainEditRequest CreateRequest(Vector3 point)
         {
