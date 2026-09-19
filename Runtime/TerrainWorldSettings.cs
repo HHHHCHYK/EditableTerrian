@@ -25,9 +25,16 @@ namespace Humanier.Terrain
         [Min(1)] public int maxQueuedEdits = 64;
         [Min(1)] public int maxInFlightMeshBuilds = 8;
         [Min(1)] public int maxMeshReplacementsPerFrame = 2;
+        [Tooltip("Main-thread time budget for incremental surface-column planning.")]
+        [Range(.25f, 4f)] public float streamingPlanningBudgetMs = 1.5f;
         [Min(16f)] public float nearUndergroundDistance = 64f;
         [Tooltip("Distance in metres at which each coarser mesh level begins.")]
         public float[] lodDistances = { 64f, 128f, 256f };
+        [Tooltip("Minimum mesh LOD used for resident chunks. One step doubles the surface sampling stride without changing the density grid.")]
+        [Range(0, 3)] public int minimumMeshLod;
+        [Header("Low-poly Surface")]
+        [Min(0f)] public float facetDetailAmplitude;
+        [Min(0.5f)] public float facetDetailSpacing = 2f;
         [Header("Protection")]
         [Range(25f, 40f)] public float minBedrockDepth = 25f;
         [Range(25f, 40f)] public float maxBedrockDepth = 40f;
@@ -39,7 +46,16 @@ namespace Humanier.Terrain
         public TerrainBiomeDefinition rockyMountains = new TerrainBiomeDefinition { broadAmplitude = 24f, detailAmplitude = 5f, mountainAmplitude = 42f, surfaceMaterial = 3, interiorMaterial = 3 };
         [Header("Cache")]
         [Min(32)] public int memoryCacheLimitMb = 512;
+        [Tooltip("Budget reserved for the procedural surface-column cache. The visible 256m working set is kept when this budget allows it.")]
+        [Min(8)] public int surfaceTileCacheBudgetMb = 32;
         public Material terrainMaterial;
+        [Header("Far Heightfield")]
+        public bool farHeightfieldEnabled;
+        [Min(512f)] public float farHeightfieldCoverage = 4096f;
+        [Min(32f)] public float farHeightfieldPatchSize = 512f;
+        [Range(2, 32)] public int farHeightfieldResolution = 8;
+        [Range(2, 64)] public int farHeightfieldNearResolution = 32;
+        [Min(1)] public int maxFarPatchesBuiltPerFrame = 2;
 
         public float ChunkSize => chunkResolution * voxelSize;
         public int SampleResolution => chunkResolution + 1;
@@ -58,10 +74,20 @@ namespace Humanier.Terrain
             maxBedrockDepth = Mathf.Max(minBedrockDepth, maxBedrockDepth);
             absoluteProtectionDepth = Mathf.Max(60f, absoluteProtectionDepth);
             if (lodDistances == null || lodDistances.Length == 0) lodDistances = new[] { 64f, 128f, 256f };
+            minimumMeshLod = Mathf.Clamp(minimumMeshLod, 0, 3);
+            facetDetailAmplitude = Mathf.Max(0f, facetDetailAmplitude);
+            facetDetailSpacing = Mathf.Max(0.5f, facetDetailSpacing);
             maxInFlightMeshBuilds = Mathf.Max(1, maxInFlightMeshBuilds);
             maxMeshReplacementsPerFrame = Mathf.Max(1, maxMeshReplacementsPerFrame);
+            streamingPlanningBudgetMs = Mathf.Clamp(streamingPlanningBudgetMs, .25f, 4f);
+            surfaceTileCacheBudgetMb = Mathf.Max(8, surfaceTileCacheBudgetMb);
             nearUndergroundDistance = Mathf.Max(16f, nearUndergroundDistance);
             surfaceMaterialDepth = Mathf.Max(.1f, surfaceMaterialDepth);
+            farHeightfieldCoverage = Mathf.Max(512f, farHeightfieldCoverage);
+            farHeightfieldPatchSize = Mathf.Max(32f, farHeightfieldPatchSize);
+            farHeightfieldResolution = Mathf.Clamp(farHeightfieldResolution, 2, 32);
+            farHeightfieldNearResolution = Mathf.Clamp(farHeightfieldNearResolution, farHeightfieldResolution, 64);
+            maxFarPatchesBuiltPerFrame = Mathf.Max(1, maxFarPatchesBuiltPerFrame);
             if (grassland == null) grassland = new TerrainBiomeDefinition { broadAmplitude = 18f, detailAmplitude = 3f, mountainAmplitude = 2f, surfaceMaterial = 1, interiorMaterial = 4 };
             if (desert == null) desert = new TerrainBiomeDefinition { broadAmplitude = 7f, detailAmplitude = 1f, surfaceMaterial = 2, interiorMaterial = 2 };
             if (rockyMountains == null) rockyMountains = new TerrainBiomeDefinition { broadAmplitude = 24f, detailAmplitude = 5f, mountainAmplitude = 42f, surfaceMaterial = 3, interiorMaterial = 3 };

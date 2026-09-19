@@ -3,7 +3,8 @@ using Unity.Mathematics;
 
 namespace Humanier.Terrain.Meshing
 {
-    // A request owns this native copy. Burst jobs must never dereference the managed source tables.
+    // Burst jobs must never dereference the managed source tables. A terrain world
+    // keeps one immutable native snapshot and shares it between its read-only jobs.
     internal struct TransvoxelTableSnapshot
     {
         internal NativeArray<byte> regularVertexCount;

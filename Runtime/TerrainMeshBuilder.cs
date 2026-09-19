@@ -1,5 +1,6 @@
 using System;
 using Unity.Burst;
+using Unity.Profiling;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
@@ -14,10 +15,13 @@ namespace Humanier.Terrain
 
     internal static class TerrainMeshBuilder
     {
-        internal static TerrainMeshBuildRequest Schedule(TerrainChunkData data, Vector3 origin, int lod, TransitionFaceMask faces = TransitionFaceMask.None, int expectedVersion = -1)
+        private static readonly ProfilerMarker ScheduleMarker = new ProfilerMarker("Terrain.Mesh.Schedule");
+        internal static TerrainMeshBuildRequest Schedule(TerrainChunkData data, Vector3 origin, int lod, TransitionFaceMask faces = TransitionFaceMask.None, int expectedVersion = -1, TerrainMeshResources resources = null)
         {
+            using var profileScope = ScheduleMarker.Auto();
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (expectedVersion >= 0 && expectedVersion != data.Version) throw new InvalidOperationException("Density data changed before meshing began.");
+            if (data.ClassifyDensity() != TerrainDensityClass.Mixed) return TerrainMeshBuildRequest.CompletedEmpty(data.Version);
             int stride = 1 << Mathf.Clamp(lod, 0, 3), samples = data.Density.Length, cells = data.Resolution / stride;
             // Mesh work can remain queued for more than four frames. TempJob is
             // invalid in that case, so the request owns persistent containers and
@@ -25,7 +29,8 @@ namespace Humanier.Terrain
             var density = new NativeArray<float>(samples, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
             var materials = new NativeArray<byte>(samples, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
             density.CopyFrom(data.Density); materials.CopyFrom(data.Material);
-            var tables = new TransvoxelTableSnapshot(Allocator.Persistent);
+            bool ownsTables = resources == null;
+            var tables = ownsTables ? new TransvoxelTableSnapshot(Allocator.Persistent) : resources.Tables;
             int capacity = math.max(16, cells * cells * cells * 12 + (data.Resolution / (stride * 2)) * (data.Resolution / (stride * 2)) * 12 * FaceCount(faces));
             var vertices = new NativeList<float3>(capacity, Allocator.Persistent);
             var colors = new NativeList<Color32>(capacity, Allocator.Persistent);
@@ -36,7 +41,7 @@ namespace Humanier.Terrain
                 transitionVertexCount = tables.transitionVertexCount, transitionTriangleIndexCount = tables.transitionTriangleIndexCount, transitionVertices = tables.transitionVertices, transitionIndices = tables.transitionIndices, transitionFlip = tables.transitionFlip, transitionCornerOffsets = tables.transitionCornerOffsets,
                 vertices = vertices, colors = colors, normals = normals, indices = indices,
                 resolution = data.Resolution, stride = stride, voxelSize = data.VoxelSize, offset = new float3(data.Id.x * data.Resolution * data.VoxelSize, data.Id.y * data.Resolution * data.VoxelSize, data.Id.z * data.Resolution * data.VoxelSize) - (float3)origin, faces = faces };
-            return new TerrainMeshBuildRequest(data.Version, job.Schedule(), density, materials, tables, vertices, colors, normals, indices);
+            return new TerrainMeshBuildRequest(data.Version, job.Schedule(), density, materials, tables, ownsTables, vertices, colors, normals, indices);
         }
 
         internal static Mesh Build(TerrainChunkData data, Vector3 origin, int lod) => Build(data, origin, lod, TransitionFaceMask.None);
@@ -44,24 +49,55 @@ namespace Humanier.Terrain
         private static int FaceCount(TransitionFaceMask faces) { int n = 0; for (int i = 0; i < 6; i++) if (((int)faces & (1 << i)) != 0) n++; return n; }
     }
 
+    internal sealed class TerrainMeshResources : IDisposable
+    {
+        private TransvoxelTableSnapshot tables;
+        private bool disposed;
+
+        internal TerrainMeshResources() => tables = new TransvoxelTableSnapshot(Allocator.Persistent);
+        internal TransvoxelTableSnapshot Tables => !disposed ? tables : throw new ObjectDisposedException(nameof(TerrainMeshResources));
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            tables.Dispose();
+            disposed = true;
+        }
+    }
+
     internal sealed class TerrainMeshBuildRequest : IDisposable
     {
+        private static readonly ProfilerMarker CompleteMarker = new ProfilerMarker("Terrain.Mesh.Complete");
         private JobHandle handle; private NativeArray<float> density; private NativeArray<byte> materials; private TransvoxelTableSnapshot tables;
-        private NativeList<float3> vertices; private NativeList<Color32> colors; private NativeList<float3> normals; private NativeList<int> indices; private bool disposed;
-        internal int Version { get; } internal bool IsCompleted => handle.IsCompleted;
-        internal TerrainMeshBuildRequest(int version, JobHandle handle, NativeArray<float> density, NativeArray<byte> materials, TransvoxelTableSnapshot tables, NativeList<float3> vertices, NativeList<Color32> colors, NativeList<float3> normals, NativeList<int> indices)
-        { Version = version; this.handle = handle; this.density = density; this.materials = materials; this.tables = tables; this.vertices = vertices; this.colors = colors; this.normals = normals; this.indices = indices; }
+        private NativeList<float3> vertices; private NativeList<Color32> colors; private NativeList<float3> normals; private NativeList<int> indices; private bool disposed; private readonly bool completedEmpty; private readonly bool ownsTables;
+        internal int Version { get; }
+        internal bool IsCompleted => completedEmpty || handle.IsCompleted;
+        internal bool HasScheduledJob => !completedEmpty;
+        internal TerrainMeshBuildRequest(int version, JobHandle handle, NativeArray<float> density, NativeArray<byte> materials, TransvoxelTableSnapshot tables, bool ownsTables, NativeList<float3> vertices, NativeList<Color32> colors, NativeList<float3> normals, NativeList<int> indices)
+        { Version = version; this.handle = handle; this.density = density; this.materials = materials; this.tables = tables; this.ownsTables = ownsTables; this.vertices = vertices; this.colors = colors; this.normals = normals; this.indices = indices; }
+        private TerrainMeshBuildRequest(int version)
+        {
+            Version = version;
+            completedEmpty = true;
+        }
+        internal static TerrainMeshBuildRequest CompletedEmpty(int version) => new TerrainMeshBuildRequest(version);
         internal Mesh Complete()
         {
+            using var profileScope = CompleteMarker.Auto();
             if (disposed) throw new ObjectDisposedException(nameof(TerrainMeshBuildRequest));
-            handle.Complete(); if (vertices.Length == 0) return null;
+            if (completedEmpty) return null;
+            handle.Complete();
+            // A chunk can contain edge vertices but no valid triangles (for example
+            // an all-air cell or a fully collapsed transition). Treat it as empty so
+            // MeshCollider never receives an invalid zero-triangle mesh.
+            if (vertices.Length == 0 || indices.Length < 3) return null;
             var mesh = new Mesh { indexFormat = vertices.Length > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16 };
             var output = new Vector3[vertices.Length]; var outputNormals = new Vector3[normals.Length]; for (int i = 0; i < output.Length; i++) { output[i] = vertices[i]; outputNormals[i] = normals[i]; }
             mesh.vertices = output; mesh.normals = outputNormals; mesh.SetColors(colors.AsArray()); mesh.SetIndices(indices.AsArray(), MeshTopology.Triangles, 0, true); mesh.RecalculateBounds(); return mesh;
         }
         public void Dispose()
         {
-            if (disposed) return; handle.Complete(); if (density.IsCreated) density.Dispose(); if (materials.IsCreated) materials.Dispose(); tables.Dispose();
+            if (disposed) return; if (!completedEmpty) handle.Complete(); if (density.IsCreated) density.Dispose(); if (materials.IsCreated) materials.Dispose(); if (ownsTables) tables.Dispose();
             if (vertices.IsCreated) vertices.Dispose(); if (colors.IsCreated) colors.Dispose(); if (normals.IsCreated) normals.Dispose(); if (indices.IsCreated) indices.Dispose(); disposed = true;
         }
     }
@@ -168,7 +204,24 @@ namespace Humanier.Terrain
             if (math.lengthsq(cross) <= .0000000001f) return;
             float3 outward = OutwardNormal((pa + pb + pc) / 3f);
             if (math.dot(cross, outward) < 0f) { int swap = b; b = c; c = swap; }
-            indices.Add(a); indices.Add(b); indices.Add(c);
+            // Keep a single palette color across the face: interpolating different
+            // material colors creates a blurred band at soil/rock boundaries.
+            Color32 ca = colors[a], cb = colors[b], cc = colors[c];
+            int ka = ColorKey(ca), kb = ColorKey(cb), kc = ColorKey(cc);
+            Color32 faceColor = ka == kb || ka == kc ? ca : kb == kc ? cb
+                : ka < kb && ka < kc ? ca : kb < kc ? cb : cc;
+            AddColoredIndex(a, faceColor); AddColoredIndex(b, faceColor); AddColoredIndex(c, faceColor);
+        }
+        private static int ColorKey(Color32 color) => (color.r << 16) | (color.g << 8) | color.b;
+        private void AddColoredIndex(int source, Color32 color)
+        {
+            if (ColorKey(colors[source]) == ColorKey(color)) { indices.Add(source); return; }
+            // Original cell vertices are still used by later triangles. Copy only
+            // conflicting colors so their geometry and normals remain unchanged.
+            int index = vertices.Length;
+            float3 position = vertices[source], normal = normals[source];
+            vertices.Add(position); normals.Add(normal); colors.Add(color);
+            indices.Add(index);
         }
         private float3 OutwardNormal(float3 point)
         {
@@ -178,6 +231,6 @@ namespace Humanier.Terrain
             float dz = z == 0 ? D(x, y, 0) - D(x, y, 1) : z == resolution ? D(x, y, resolution - 1) - D(x, y, resolution) : D(x, y, z - 1) - D(x, y, z + 1);
             return math.normalizesafe(new float3(dx, dy, dz));
         }
-        private Color32 C(float3 p){int x=math.clamp((int)math.round((p.x-offset.x)/voxelSize),0,resolution),y=math.clamp((int)math.round((p.y-offset.y)/voxelSize),0,resolution),z=math.clamp((int)math.round((p.z-offset.z)/voxelSize),0,resolution);byte m=materials[x+(resolution+1)*(y+(resolution+1)*z)];return m==2?new Color32(199,148,74,255):m==3?new Color32(97,107,102,255):m==4?new Color32(117,87,58,255):new Color32(64,148,66,255);}
+        private Color32 C(float3 p){int x=math.clamp((int)math.round((p.x-offset.x)/voxelSize),0,resolution),y=math.clamp((int)math.round((p.y-offset.y)/voxelSize),0,resolution),z=math.clamp((int)math.round((p.z-offset.z)/voxelSize),0,resolution);byte m=materials[x+(resolution+1)*(y+(resolution+1)*z)];return TerrainMaterialPalette.ColorFor(m);}
     }
 }

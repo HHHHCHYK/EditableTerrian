@@ -76,6 +76,115 @@ namespace Humanier.Terrain.Tests
             Assert.Throws<System.InvalidOperationException>(() => TerrainMeshBuilder.Schedule(data, Vector3.zero, 0, TransitionFaceMask.None, data.Version - 1));
         }
 
+        [TestCase(0, TransitionFaceMask.None)]
+        [TestCase(1, TransitionFaceMask.None)]
+        [TestCase(1, TransitionFaceMask.PositiveX)]
+        [TestCase(1, TransitionFaceMask.NegativeX)]
+        [TestCase(1, TransitionFaceMask.PositiveY)]
+        [TestCase(1, TransitionFaceMask.NegativeY)]
+        [TestCase(1, TransitionFaceMask.PositiveZ)]
+        [TestCase(1, TransitionFaceMask.NegativeZ)]
+        [TestCase(2, TransitionFaceMask.PositiveX)]
+        public void MaterialBoundariesUseSolidFaceColorsWithoutChangingGeometry(int lod, TransitionFaceMask faces)
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+            FillTransitionField(data);
+            for (int i = 0; i < data.Material.Length; i++) data.Material[i] = 2;
+            Mesh baseline = TerrainMeshBuilder.Build(data, Vector3.zero, lod, faces);
+            for (int z = 0; z <= data.Resolution; z++)
+            for (int y = 0; y <= data.Resolution; y++)
+            for (int x = 0; x <= data.Resolution; x++)
+                data.Material[data.Index(x, y, z)] = (byte)(x + y + z < 48 ? 2 : 3);
+            byte[] materialBefore = (byte[])data.Material.Clone();
+            Mesh boundary = TerrainMeshBuilder.Build(data, Vector3.zero, lod, faces);
+            try
+            {
+                int[] expected = baseline.triangles, actual = boundary.triangles;
+                Vector3[] originalPositions = baseline.vertices, positions = boundary.vertices;
+                Vector3[] originalNormals = baseline.normals, normals = boundary.normals;
+                Color32[] colors = boundary.colors32;
+                var faceColors = new HashSet<Color32>();
+                Assert.AreEqual(expected.Length, actual.Length);
+                for (int i = 0; i < actual.Length; i++)
+                {
+                    Assert.AreEqual(originalPositions[expected[i]], positions[actual[i]], "Material boundaries must preserve triangle positions and winding.");
+                    Assert.AreEqual(originalNormals[expected[i]], normals[actual[i]]);
+                    Assert.AreEqual(colors[actual[i - i % 3]], colors[actual[i]], "A triangle must not blend different material colors.");
+                    faceColors.Add(colors[actual[i]]);
+                }
+                Assert.AreEqual(2, faceColors.Count, "Both material regions must remain visible.");
+                CollectionAssert.AreEqual(materialBefore, data.Material);
+            }
+            finally { Object.DestroyImmediate(baseline); Object.DestroyImmediate(boundary); }
+        }
+
+        [TestCase(1f)]
+        [TestCase(0f)]
+        [TestCase(-1f)]
+        public void UniformDensitySkipsMeshConstruction(float density)
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+            for (int i = 0; i < data.Density.Length; i++) data.Density[i] = density;
+            using var request = TerrainMeshBuilder.Schedule(data, Vector3.zero, 0, TransitionFaceMask.PositiveX, data.Version);
+            Assert.IsFalse(request.HasScheduledJob);
+            Assert.IsTrue(request.IsCompleted);
+            Assert.IsNull(request.Complete());
+        }
+
+        [Test]
+        public void ZeroAndPositiveSamplesRemainAMixedSurface()
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+            for (int i = 0; i < data.Density.Length; i++) data.Density[i] = 0f;
+            data.Density[data.Index(16, 16, 16)] = 1f;
+            Mesh mesh = TerrainMeshBuilder.Build(data, Vector3.zero, 0);
+            Assert.That(mesh, Is.Not.Null);
+            Object.DestroyImmediate(mesh);
+        }
+
+        [Test]
+        public void RestoreIsReflectedByDensityClassification()
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+            var restored = new float[data.Density.Length];
+            for (int i = 0; i < restored.Length; i++) restored[i] = 1f;
+            data.Restore(restored, data.Material);
+            Assert.AreEqual(TerrainDensityClass.AllPositive, data.ClassifyDensity());
+
+            for (int i = 0; i < restored.Length; i++) restored[i] = -1f;
+            data.Restore(restored, data.Material);
+            Assert.AreEqual(TerrainDensityClass.AllNonPositive, data.ClassifyDensity());
+        }
+
+        [Test]
+        public void NaNDensityCannotBeClassifiedAsUniform()
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+            for (int i = 0; i < data.Density.Length; i++) data.Density[i] = -1f;
+            data.Density[data.Index(16, 16, 16)] = float.NaN;
+            Assert.AreEqual(TerrainDensityClass.Mixed, data.ClassifyDensity());
+        }
+
+        [Test]
+        public void SharedMeshingResourcesSurviveCompletedRequests()
+        {
+            var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
+            for (int z = 0; z <= data.Resolution; z++)
+            for (int y = 0; y <= data.Resolution; y++)
+            for (int x = 0; x <= data.Resolution; x++)
+                data.Density[data.Index(x, y, z)] = x - 16f;
+
+            using var resources = new TerrainMeshResources();
+            using var first = TerrainMeshBuilder.Schedule(data, Vector3.zero, 0, TransitionFaceMask.None, data.Version, resources);
+            using var second = TerrainMeshBuilder.Schedule(data, Vector3.zero, 0, TransitionFaceMask.None, data.Version, resources);
+            Mesh firstMesh = first.Complete();
+            Mesh secondMesh = second.Complete();
+            Assert.That(firstMesh, Is.Not.Null);
+            Assert.That(secondMesh, Is.Not.Null);
+            Object.DestroyImmediate(firstMesh);
+            Object.DestroyImmediate(secondMesh);
+        }
+
         [Test]
         public void PlaneNormalsPointOutOfPositiveDensity()
         {

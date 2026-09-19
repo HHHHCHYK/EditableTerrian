@@ -11,6 +11,47 @@ namespace Humanier.Terrain.Tests
         [SetUp] public void SetUp() { settings = ScriptableObject.CreateInstance<TerrainWorldSettings>(); settings.seed = 42; }
         [TearDown] public void TearDown() { Object.DestroyImmediate(settings); }
         [Test] public void SameSeedAndCoordinatesProduceSameSurface() => Assert.AreEqual(TerrainGenerator.SurfaceHeight(settings, 321.25f, -19.5f), TerrainGenerator.SurfaceHeight(settings, 321.25f, -19.5f));
+        [Test]
+        public void FacetSurfaceDetailIsDeterministicAndBounded()
+        {
+            settings.facetDetailAmplitude = .15f;
+            settings.facetDetailSpacing = 2f;
+            float first = TerrainGenerator.FacetSurfaceDetail(settings, -3.25f, 4.75f);
+            float second = TerrainGenerator.FacetSurfaceDetail(settings, -3.25f, 4.75f);
+            Assert.AreEqual(first, second);
+            for (int z = -8; z <= 8; z++)
+            for (int x = -8; x <= 8; x++)
+                Assert.That(Mathf.Abs(TerrainGenerator.FacetSurfaceDetail(settings, x * .5f, z * .5f)), Is.LessThanOrEqualTo(settings.facetDetailAmplitude));
+        }
+        [Test]
+        public void FacetSurfaceDetailStaysContinuousAcrossNegativeCellBoundaries()
+        {
+            settings.facetDetailAmplitude = .15f;
+            settings.facetDetailSpacing = 2f;
+            const float epsilon = .0001f;
+            foreach (float edge in new[] { -4f, -2f, 0f, 2f, 4f })
+            {
+                float acrossX = TerrainGenerator.FacetSurfaceDetail(settings, edge - epsilon, .75f) -
+                    TerrainGenerator.FacetSurfaceDetail(settings, edge + epsilon, .75f);
+                float acrossZ = TerrainGenerator.FacetSurfaceDetail(settings, .75f, edge - epsilon) -
+                    TerrainGenerator.FacetSurfaceDetail(settings, .75f, edge + epsilon);
+                Assert.That(Mathf.Abs(acrossX), Is.LessThan(.0001f), $"X boundary at {edge} has a visible jump.");
+                Assert.That(Mathf.Abs(acrossZ), Is.LessThan(.0001f), $"Z boundary at {edge} has a visible jump.");
+            }
+        }
+        [Test]
+        public void FacetEditOffsetIsZeroAtBrushCenterAndBounded()
+        {
+            settings.facetDetailAmplitude = .15f;
+            settings.facetDetailSpacing = 2f;
+            Vector3 center = new Vector3(-1.25f, .75f, 2.5f);
+            Assert.AreEqual(0f, TerrainGenerator.FacetEditOffset(settings, center, center, 2f));
+            for (int i = 0; i < 32; i++)
+            {
+                Vector3 point = center + new Vector3((i % 4) * .25f, ((i / 4) % 4) * .2f, (i / 16) * .35f);
+                Assert.That(Mathf.Abs(TerrainGenerator.FacetEditOffset(settings, point, center, 2f)), Is.LessThanOrEqualTo(settings.facetDetailAmplitude));
+            }
+        }
         [Test] public void BedrockDepthStaysWithinConfiguredRange()
         {
             for (int x = -100; x <= 100; x += 10)
@@ -63,6 +104,48 @@ namespace Humanier.Terrain.Tests
             }
         }
         [Test]
+        public void SharedGenerationContextReusesOneColumnAndPreservesChunkSamples()
+        {
+            var context = new TerrainGenerationContext(settings);
+            var lowerId = new TerrainChunkId(-2, -1, 3);
+            var upperId = new TerrainChunkId(-2, 2, 3);
+            TerrainSurfaceRange range = context.SurfaceRange(lowerId);
+            var optimizedLower = new TerrainChunkData(settings, lowerId, context, true);
+            var optimizedUpper = new TerrainChunkData(settings, upperId, context, true);
+            TerrainChunkData referenceLower = CreateReferenceChunk(lowerId);
+            TerrainChunkData referenceUpper = CreateReferenceChunk(upperId);
+
+            Assert.AreEqual(1, context.SurfaceBuildCount);
+            Assert.AreEqual(1, context.FullBuildCount);
+            Assert.AreEqual(1, context.CachedColumnCount);
+            Assert.LessOrEqual(range.MinHeight, range.MaxHeight);
+            AssertChunkDataBitwiseEqual(referenceLower, optimizedLower);
+            AssertChunkDataBitwiseEqual(referenceUpper, optimizedUpper);
+        }
+        [Test]
+        public void SharedGenerationContextRejectsRuntimeSettingMutation()
+        {
+            var context = new TerrainGenerationContext(settings);
+            context.SurfaceRange(new TerrainChunkId(0, 0, 0));
+            settings.seed++;
+            Assert.Throws<System.InvalidOperationException>(() => context.SurfaceRange(new TerrainChunkId(1, 0, 0)));
+        }
+        [Test]
+        public void SurfaceColumnCacheKeepsThe256MetreWorkingSetWithinThe32MbBudget()
+        {
+            settings.viewDistance = 256f;
+            settings.surfaceTileCacheBudgetMb = 32;
+            int horizontal = Mathf.CeilToInt(settings.viewDistance / settings.ChunkSize);
+            int visibleColumns = 0;
+            for (int z = -horizontal; z <= horizontal; z++)
+            for (int x = -horizontal; x <= horizontal; x++)
+                if (x * x + z * z <= horizontal * horizontal) visibleColumns++;
+
+            int capacity = TerrainGenerationContext.RecommendedColumnCacheCapacity(settings);
+            Assert.GreaterOrEqual(capacity, visibleColumns);
+            Assert.LessOrEqual(TerrainGenerationContext.EstimatedCacheCapacityBytes(settings), 32L * 1024L * 1024L);
+        }
+        [Test]
         public void RaycastOnlyReturnsChunksOwnedByThisWorld()
         {
             var firstObject = new GameObject("First terrain world");
@@ -80,6 +163,51 @@ namespace Humanier.Terrain.Tests
             Object.DestroyImmediate(ownChunk);
             Object.DestroyImmediate(firstObject);
             Object.DestroyImmediate(secondObject);
+        }
+        [Test]
+        public void ConfigureBeforeFirstUpdateUsesTheProvidedRuntimeSettings()
+        {
+            TerrainWorldSettings runtimeSettings = ScriptableObject.CreateInstance<TerrainWorldSettings>();
+            runtimeSettings.seed = 9876;
+            GameObject focusObject = new GameObject("Terrain configure focus");
+            GameObject worldObject = new GameObject("Terrain configured before update");
+            TerrainWorld world = worldObject.AddComponent<TerrainWorld>();
+
+            Assert.DoesNotThrow(() => world.Configure(runtimeSettings, focusObject.transform));
+            Assert.AreSame(runtimeSettings, world.Settings);
+            Assert.AreEqual(9876, world.Settings.seed);
+
+            Object.DestroyImmediate(worldObject);
+            Object.DestroyImmediate(focusObject);
+            Object.DestroyImmediate(runtimeSettings);
+        }
+        [Test]
+        public void ConfigureRejectsAWorldThatAlreadyCreatedGenerationState()
+        {
+            TerrainWorldSettings replacement = ScriptableObject.CreateInstance<TerrainWorldSettings>();
+            var worldObject = new GameObject("Terrain configure after query");
+            TerrainWorld world = worldObject.AddComponent<TerrainWorld>();
+
+            world.SampleSurfaceHeight(Vector3.zero);
+
+            Assert.Throws<System.InvalidOperationException>(() => world.Configure(replacement, null));
+            Object.DestroyImmediate(worldObject);
+            Object.DestroyImmediate(replacement);
+        }
+        [Test]
+        public void WorldQueriesAndEditsRejectGenerationSettingMutation()
+        {
+            var worldObject = new GameObject("Terrain settings mutation guard");
+            TerrainWorld world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "settings", settings);
+            world.SampleSurfaceHeight(Vector3.zero);
+            settings.seed++;
+
+            Assert.Throws<System.InvalidOperationException>(() => world.SampleBiome(Vector3.zero));
+            Assert.Throws<System.InvalidOperationException>(() => world.SampleSurfaceHeight(Vector3.zero));
+            Assert.Throws<System.InvalidOperationException>(() => world.SampleGeneratedDensity(Vector3.zero));
+            Assert.Throws<System.InvalidOperationException>(() => world.RequestEdit(TerrainEditRequest.Dig(Vector3.zero, 1f)));
+            Object.DestroyImmediate(worldObject);
         }
         [Test]
         public void StreamingPlanStaysWithinConfiguredDensityCapacity()
@@ -274,6 +402,37 @@ namespace Humanier.Terrain.Tests
             result.AddComponent<BoxCollider>();
             var marker = result.AddComponent<TerrainChunkMarker>();
             marker.Owner = owner;
+            return result;
+        }
+        private static void AssertChunkDataBitwiseEqual(TerrainChunkData expected, TerrainChunkData actual)
+        {
+            Assert.AreEqual(expected.Density.Length, actual.Density.Length);
+            Assert.AreEqual(expected.Material.Length, actual.Material.Length);
+            for (int i = 0; i < expected.Density.Length; i++)
+            {
+                Assert.AreEqual(System.BitConverter.SingleToInt32Bits(expected.Density[i]), System.BitConverter.SingleToInt32Bits(actual.Density[i]), $"Density differs at sample {i}.");
+                Assert.AreEqual(expected.Material[i], actual.Material[i], $"Material differs at sample {i}.");
+            }
+        }
+        private TerrainChunkData CreateReferenceChunk(TerrainChunkId id)
+        {
+            var result = new TerrainChunkData(settings, id, null, false);
+            int resolution = result.Resolution;
+            int samplesPerAxis = resolution + 1;
+            for (int z = 0; z <= resolution; z++)
+            for (int x = 0; x <= resolution; x++)
+            {
+                float worldX = (id.x * resolution + x) * result.VoxelSize;
+                float worldZ = (id.z * resolution + z) * result.VoxelSize;
+                TerrainColumnSample column = TerrainGenerator.SampleColumn(settings, worldX, worldZ);
+                for (int y = 0; y <= resolution; y++)
+                {
+                    float worldY = (id.y * resolution + y) * result.VoxelSize;
+                    int index = x + samplesPerAxis * (y + samplesPerAxis * z);
+                    result.Density[index] = column.InitialDensity(settings, worldY);
+                    result.Material[index] = column.MaterialAt(settings, worldY);
+                }
+            }
             return result;
         }
         private static object Invoke(object target, string name, params object[] arguments) => target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(target, arguments);
