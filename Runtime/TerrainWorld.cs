@@ -121,6 +121,10 @@ namespace Humanier.Terrain
             public int appliedMeshRevision = -1;
             public int pendingFrameRevision;
             public int appliedFrameRevision;
+            // Mesh vertices for this chunk stay expressed in the projection frame
+            // that existed when its root was created. The root receives later
+            // rigid frame shifts, so rebuilt/late meshes must reuse this snapshot.
+            public CurvedWorldProjectionSnapshot meshProjectionSnapshot;
             public MeshSignature desiredMesh;
             public bool hasDesiredMesh;
         }
@@ -369,7 +373,7 @@ namespace Humanier.Terrain
             if (arcFromAnchor < Settings.relocationThreshold) return false;
             InfiniteWorldPosition nextAnchor = curvedFrame.SceneToLogical(sceneFocus);
             CurvedWorldFrameShift shift = curvedFrame.Reanchor(nextAnchor);
-            curvedFrameRevision++;
+            curvedFrameRevision = curvedFrame.Revision;
             foreach (LoadedChunk chunk in chunks.Values)
             {
                 Transform chunkTransform = chunk.gameObject.transform;
@@ -1295,7 +1299,8 @@ namespace Humanier.Terrain
                 data.GenerateInitial(Settings, GetGenerationContext());
             }
             var go = new GameObject($"Terrain {id}"); go.transform.SetParent(transform, false);
-            var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>(), lod = GetLod(id), lastAccessFrame = frameCounter, isLoaded = true };
+            var loaded = new LoadedChunk { data = data, gameObject = go, filter = go.AddComponent<MeshFilter>(), lod = GetLod(id), lastAccessFrame = frameCounter, isLoaded = true,
+                meshProjectionSnapshot = Settings.topology == TerrainTopology.InfiniteCurved ? curvedFrame.ProjectionSnapshot : default };
             go.AddComponent<MeshRenderer>().sharedMaterial = Settings.terrainMaterial != null ? Settings.terrainMaterial : generatedMaterial;
             if (generateColliders) loaded.collider = go.AddComponent<MeshCollider>();
             TerrainChunkMarker marker = go.AddComponent<TerrainChunkMarker>();
@@ -1332,7 +1337,7 @@ namespace Humanier.Terrain
                 Mesh next = request.Complete();
                 activeMeshBuilds--;
                 bool current = request.Version == chunk.data.Version && chunk.pendingMeshRevision == chunk.meshRevision;
-                int meshFrameRevision = chunk.pendingFrameRevision;
+                int meshFrameRevision = request.FrameRevision;
                 request.Dispose();
                 if (!current) { if (next != null) Destroy(next); QueueMeshBuild(chunk); continue; }
                 AssignMesh(chunk, next, chunk.pendingMeshRevision, meshFrameRevision);
@@ -1360,10 +1365,12 @@ namespace Humanier.Terrain
                 if (!chunk.isLoaded || chunk.pendingMesh != null || !chunk.meshDirty) continue;
                 chunk.meshDirty = false;
                 chunk.pendingMeshRevision = chunk.meshRevision;
-                chunk.pendingFrameRevision = curvedFrameRevision;
+                chunk.pendingFrameRevision = chunk.meshProjectionSnapshot.Revision;
                 chunk.pendingMesh = TerrainMeshBuilder.Schedule(chunk.data, originOffset, chunk.lod,
                     GetTransitionFaces(chunk.data.Id, chunk.lod), chunk.data.Version, meshResources,
-                    Settings.topology == TerrainTopology.InfiniteCurved ? curvedFrame : null);
+                    null, Settings.topology == TerrainTopology.InfiniteCurved
+                        ? chunk.meshProjectionSnapshot
+                        : (CurvedWorldProjectionSnapshot?)null);
                 inFlightMeshBuilds.Add(chunk);
                 activeMeshBuilds++;
             }
@@ -1372,7 +1379,7 @@ namespace Humanier.Terrain
         {
             using var profileScope = AssignMeshMarker.Auto();
             Mesh old = chunk.filter.sharedMesh;
-            if (Settings.topology != TerrainTopology.InfiniteCurved || meshFrameRevision == curvedFrameRevision)
+            if (Settings.topology != TerrainTopology.InfiniteCurved || meshFrameRevision == curvedFrame.Revision)
             {
                 chunk.gameObject.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
             }

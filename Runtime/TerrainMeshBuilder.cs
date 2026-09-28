@@ -16,7 +16,7 @@ namespace Humanier.Terrain
     internal static class TerrainMeshBuilder
     {
         private static readonly ProfilerMarker ScheduleMarker = new ProfilerMarker("Terrain.Mesh.Schedule");
-        internal static TerrainMeshBuildRequest Schedule(TerrainChunkData data, Vector3 origin, int lod, TransitionFaceMask faces = TransitionFaceMask.None, int expectedVersion = -1, TerrainMeshResources resources = null, CurvedWorldFrame curvedFrame = null)
+        internal static TerrainMeshBuildRequest Schedule(TerrainChunkData data, Vector3 origin, int lod, TransitionFaceMask faces = TransitionFaceMask.None, int expectedVersion = -1, TerrainMeshResources resources = null, CurvedWorldFrame curvedFrame = null, CurvedWorldProjectionSnapshot? projectionSnapshot = null)
         {
             using var profileScope = ScheduleMarker.Auto();
             if (data == null) throw new ArgumentNullException(nameof(data));
@@ -36,14 +36,24 @@ namespace Humanier.Terrain
             var colors = new NativeList<Color32>(capacity, Allocator.Persistent);
             var normals = new NativeList<float3>(capacity, Allocator.Persistent);
             var indices = new NativeList<int>(capacity * 3, Allocator.Persistent);
+            CurvedWorldProjectionSnapshot? capturedProjection = projectionSnapshot ??
+                (curvedFrame == null ? (CurvedWorldProjectionSnapshot?)null : curvedFrame.ProjectionSnapshot);
+            double chunkOriginX = data.Id.x * (double)data.Resolution * data.VoxelSize;
+            double chunkOriginY = data.Id.y * (double)data.Resolution * data.VoxelSize;
+            double chunkOriginZ = data.Id.z * (double)data.Resolution * data.VoxelSize;
+            float3 meshOffset = capturedProjection.HasValue
+                ? float3.zero
+                : new float3((float)(chunkOriginX - origin.x), (float)(chunkOriginY - origin.y),
+                    (float)(chunkOriginZ - origin.z));
             var job = new TerrainMeshingJob { density = density, materials = materials,
                 regularVertexCount = tables.regularVertexCount, regularTriangleIndexCount = tables.regularTriangleIndexCount, regularVertices = tables.regularVertices, regularIndices = tables.regularIndices,
                 transitionVertexCount = tables.transitionVertexCount, transitionTriangleIndexCount = tables.transitionTriangleIndexCount, transitionVertices = tables.transitionVertices, transitionIndices = tables.transitionIndices, transitionFlip = tables.transitionFlip, transitionCornerOffsets = tables.transitionCornerOffsets,
                 vertices = vertices, colors = colors, normals = normals, indices = indices,
-                resolution = data.Resolution, stride = stride, voxelSize = data.VoxelSize, offset = new float3((float)(data.Id.x * data.Resolution * data.VoxelSize), data.Id.y * data.Resolution * data.VoxelSize, (float)(data.Id.z * data.Resolution * data.VoxelSize)) - (float3)origin, faces = faces };
-            CurvedMeshProjection projection = curvedFrame == null
-                ? default
-                : new CurvedMeshProjection(curvedFrame, data.VoxelSize * data.Resolution, origin);
+                resolution = data.Resolution, stride = stride, voxelSize = data.VoxelSize,
+                offset = meshOffset, faces = faces };
+            CurvedMeshProjection projection = capturedProjection.HasValue
+                ? new CurvedMeshProjection(capturedProjection.Value, chunkOriginX, chunkOriginY, chunkOriginZ)
+                : default;
             return new TerrainMeshBuildRequest(data.Version, job.Schedule(), density, materials, tables, ownsTables, vertices, colors, normals, indices, projection);
         }
 
@@ -74,13 +84,15 @@ namespace Humanier.Terrain
         private JobHandle handle; private NativeArray<float> density; private NativeArray<byte> materials; private TransvoxelTableSnapshot tables;
         private NativeList<float3> vertices; private NativeList<Color32> colors; private NativeList<float3> normals; private NativeList<int> indices; private bool disposed; private readonly bool completedEmpty; private readonly bool ownsTables; private readonly CurvedMeshProjection projection;
         internal int Version { get; }
+        internal int FrameRevision { get; }
         internal bool IsCompleted => completedEmpty || handle.IsCompleted;
         internal bool HasScheduledJob => !completedEmpty;
         internal TerrainMeshBuildRequest(int version, JobHandle handle, NativeArray<float> density, NativeArray<byte> materials, TransvoxelTableSnapshot tables, bool ownsTables, NativeList<float3> vertices, NativeList<Color32> colors, NativeList<float3> normals, NativeList<int> indices, CurvedMeshProjection projection)
-        { Version = version; this.handle = handle; this.density = density; this.materials = materials; this.tables = tables; this.ownsTables = ownsTables; this.vertices = vertices; this.colors = colors; this.normals = normals; this.indices = indices; this.projection = projection; }
+        { Version = version; FrameRevision = projection.Revision; this.handle = handle; this.density = density; this.materials = materials; this.tables = tables; this.ownsTables = ownsTables; this.vertices = vertices; this.colors = colors; this.normals = normals; this.indices = indices; this.projection = projection; }
         private TerrainMeshBuildRequest(int version)
         {
             Version = version;
+            FrameRevision = 0;
             completedEmpty = true;
         }
         internal static TerrainMeshBuildRequest CompletedEmpty(int version) => new TerrainMeshBuildRequest(version);
@@ -109,33 +121,24 @@ namespace Humanier.Terrain
 
     internal readonly struct CurvedMeshProjection
     {
-        private readonly double radius;
-        private readonly double anchorX;
-        private readonly double anchorZ;
-        private readonly Vector3 logicalOrigin;
-        public bool Enabled => radius > 0d;
+        private readonly CurvedWorldProjectionSnapshot snapshot;
+        private readonly double logicalOriginX;
+        private readonly double logicalOriginY;
+        private readonly double logicalOriginZ;
+        public bool Enabled => snapshot.Radius > 0d;
+        public int Revision => snapshot.Revision;
 
-        public CurvedMeshProjection(CurvedWorldFrame frame, double chunkSize, Vector3 logicalOrigin)
+        public CurvedMeshProjection(CurvedWorldProjectionSnapshot snapshot, double logicalOriginX,
+            double logicalOriginY, double logicalOriginZ)
         {
-            radius = frame.Radius;
-            InfiniteWorldPosition anchor = frame.Anchor;
-            anchorX = anchor.LogicalX(chunkSize);
-            anchorZ = anchor.LogicalZ(chunkSize);
-            this.logicalOrigin = logicalOrigin;
+            this.snapshot = snapshot;
+            this.logicalOriginX = logicalOriginX;
+            this.logicalOriginY = logicalOriginY;
+            this.logicalOriginZ = logicalOriginZ;
         }
 
-        public Vector3 Project(Vector3 flatScene)
-        {
-            double x = flatScene.x + logicalOrigin.x - anchorX;
-            double z = flatScene.z + logicalOrigin.z - anchorZ;
-            double height = flatScene.y + logicalOrigin.y;
-            double arc = Math.Sqrt(x * x + z * z);
-            Vector3 up = arc < 1e-9
-                ? Vector3.up
-                : new Vector3((float)(x * Math.Sin(arc / radius) / arc), (float)Math.Cos(arc / radius),
-                    (float)(z * Math.Sin(arc / radius) / arc));
-            return new Vector3(0f, (float)-radius, 0f) + up * (float)(radius + height);
-        }
+        public Vector3 Project(Vector3 flatScene) => snapshot.ProjectFlatScene(flatScene,
+            logicalOriginX, logicalOriginY, logicalOriginZ);
     }
 
     [BurstCompile]

@@ -82,9 +82,21 @@ namespace Humanier.Terrain
             Translation = pivot - rotation * pivot;
         }
 
+        private CurvedWorldFrameShift(Quaternion rotation, Vector3 translation)
+        {
+            Pivot = Vector3.zero;
+            Rotation = rotation;
+            Translation = translation;
+        }
+
         public Vector3 TransformPoint(Vector3 point) => Rotation * point + Translation;
         public Vector3 TransformDirection(Vector3 direction) => Rotation * direction;
         public Vector3 RelocationDelta => Rotation == Quaternion.identity ? Translation : Vector3.zero;
+
+        /// <summary>Returns the rigid transform produced by applying this shift and then <paramref name="next"/>.</summary>
+        public CurvedWorldFrameShift Then(CurvedWorldFrameShift next) => new CurvedWorldFrameShift(
+            next.Rotation * Rotation,
+            next.Rotation * Translation + next.Translation);
     }
 
     [Serializable]
