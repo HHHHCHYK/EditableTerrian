@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using Unity.Profiling;
@@ -56,10 +57,10 @@ namespace Humanier.Terrain
         private readonly TerrainGenerationSettingsKey settingsKey;
         private readonly TerrainNoiseSampler noise;
         private readonly int columnCacheCapacity;
-        private readonly Dictionary<Vector2Int, TerrainColumnGrid> columns = new Dictionary<Vector2Int, TerrainColumnGrid>();
-        private readonly LinkedList<Vector2Int> columnOrder = new LinkedList<Vector2Int>();
-        private readonly Dictionary<Vector2Int, LinkedListNode<Vector2Int>> columnNodes = new Dictionary<Vector2Int, LinkedListNode<Vector2Int>>();
-        private readonly Dictionary<Vector2Int, PendingSurfaceColumn> pendingColumns = new Dictionary<Vector2Int, PendingSurfaceColumn>();
+        private readonly Dictionary<TerrainColumnId, TerrainColumnGrid> columns = new Dictionary<TerrainColumnId, TerrainColumnGrid>();
+        private readonly LinkedList<TerrainColumnId> columnOrder = new LinkedList<TerrainColumnId>();
+        private readonly Dictionary<TerrainColumnId, LinkedListNode<TerrainColumnId>> columnNodes = new Dictionary<TerrainColumnId, LinkedListNode<TerrainColumnId>>();
+        private readonly Dictionary<TerrainColumnId, PendingSurfaceColumn> pendingColumns = new Dictionary<TerrainColumnId, PendingSurfaceColumn>();
 
         internal int SurfaceBuildCount { get; private set; }
         internal int FullBuildCount { get; private set; }
@@ -102,7 +103,7 @@ namespace Humanier.Terrain
         {
             using var profileScope = SurfaceTileMarker.Auto();
             ValidateSettings(settings.chunkResolution, settings.voxelSize);
-            Vector2Int key = new Vector2Int(id.x, id.z);
+            TerrainColumnId key = new TerrainColumnId(id.x, id.z);
             if (columns.TryGetValue(key, out TerrainColumnGrid existing))
             {
                 using var cacheScope = SurfaceTileCacheMarker.Auto();
@@ -113,7 +114,7 @@ namespace Humanier.Terrain
 
             if (!pendingColumns.TryGetValue(key, out PendingSurfaceColumn pending))
             {
-                pending = new PendingSurfaceColumn(new TerrainColumnGrid(settings.SampleResolution, key.x, key.y));
+                pending = new PendingSurfaceColumn(new TerrainColumnGrid(settings.SampleResolution, key.x, key.z));
                 pendingColumns.Add(key, pending);
             }
 
@@ -126,8 +127,8 @@ namespace Humanier.Terrain
                 int index = pending.cursor++;
                 int z = index / samplesPerAxis;
                 int x = index - z * samplesPerAxis;
-                float worldX = (key.x * resolution + x) * settings.voxelSize;
-                float worldZ = (key.y * resolution + z) * settings.voxelSize;
+                double worldX = (key.x * resolution + x) * (double)settings.voxelSize;
+                double worldZ = (key.z * resolution + z) * (double)settings.voxelSize;
                 float surface = noise.SurfaceHeight(worldX, worldZ, out TerrainBiome biome);
                 pending.column.SurfaceHeights[index] = surface;
                 pending.column.Biomes[index] = (byte)biome;
@@ -186,7 +187,7 @@ namespace Humanier.Terrain
         private TerrainColumnGrid GetColumn(TerrainChunkId id)
         {
             ValidateSettings(settings.chunkResolution, settings.voxelSize);
-            var key = new Vector2Int(id.x, id.z);
+            var key = new TerrainColumnId(id.x, id.z);
             if (columns.TryGetValue(key, out TerrainColumnGrid existing))
             {
                 TouchColumn(key);
@@ -209,33 +210,33 @@ namespace Humanier.Terrain
         {
             while (columns.Count > columnCacheCapacity && columnOrder.Count > 0)
             {
-                LinkedListNode<Vector2Int> oldest = columnOrder.First;
+                LinkedListNode<TerrainColumnId> oldest = columnOrder.First;
                 columnOrder.RemoveFirst();
                 columnNodes.Remove(oldest.Value);
                 columns.Remove(oldest.Value);
             }
         }
 
-        private void TouchColumn(Vector2Int key)
+        private void TouchColumn(TerrainColumnId key)
         {
-            if (columnNodes.TryGetValue(key, out LinkedListNode<Vector2Int> node))
+            if (columnNodes.TryGetValue(key, out LinkedListNode<TerrainColumnId> node))
                 columnOrder.Remove(node);
             columnNodes[key] = columnOrder.AddLast(key);
         }
 
-        private TerrainColumnGrid BuildSurfaceColumn(Vector2Int key)
+        private TerrainColumnGrid BuildSurfaceColumn(TerrainColumnId key)
         {
             using var profileScope = SurfaceColumnMarker.Auto();
             int resolution = settings.chunkResolution;
             int samplesPerAxis = resolution + 1;
-            var result = new TerrainColumnGrid(samplesPerAxis, key.x, key.y);
+            var result = new TerrainColumnGrid(samplesPerAxis, key.x, key.z);
             float min = float.MaxValue;
             float max = float.MinValue;
             for (int z = 0; z <= resolution; z++)
             for (int x = 0; x <= resolution; x++)
             {
-                float worldX = (key.x * resolution + x) * settings.voxelSize;
-                float worldZ = (key.y * resolution + z) * settings.voxelSize;
+                double worldX = (key.x * resolution + x) * (double)settings.voxelSize;
+                double worldZ = (key.z * resolution + z) * (double)settings.voxelSize;
                 int index = x + samplesPerAxis * z;
                 float surface = noise.SurfaceHeight(worldX, worldZ, out TerrainBiome biome);
                 result.SurfaceHeights[index] = surface;
@@ -258,8 +259,8 @@ namespace Humanier.Terrain
             for (int x = 0; x <= resolution; x++)
             {
                 int index = x + samplesPerAxis * z;
-                float worldX = (column.X * resolution + x) * settings.voxelSize;
-                float worldZ = (column.Z * resolution + z) * settings.voxelSize;
+                double worldX = (column.X * resolution + x) * (double)settings.voxelSize;
+                double worldZ = (column.Z * resolution + z) * (double)settings.voxelSize;
                 float depth = Mathf.Lerp(settings.minBedrockDepth, settings.maxBedrockDepth, noise.Bedrock(worldX, worldZ));
                 column.BedrockHeights[index] = column.SurfaceHeights[index] - depth;
             }
@@ -275,8 +276,8 @@ namespace Humanier.Terrain
 
         private sealed class TerrainColumnGrid
         {
-            internal readonly int X;
-            internal readonly int Z;
+            internal readonly long X;
+            internal readonly long Z;
             internal readonly float[] SurfaceHeights;
             internal readonly byte[] Biomes;
             internal readonly float[] BedrockHeights;
@@ -285,7 +286,7 @@ namespace Humanier.Terrain
             internal TerrainSurfaceRange Range;
             internal bool FullReady;
 
-            internal TerrainColumnGrid(int samplesPerAxis, int x = 0, int z = 0)
+            internal TerrainColumnGrid(int samplesPerAxis, long x = 0, long z = 0)
             {
                 X = x;
                 Z = z;
@@ -341,10 +342,15 @@ namespace Humanier.Terrain
                 mountains = new TerrainBiomeKey(settings.GetBiomeDefinition(TerrainBiome.RockyMountains));
             }
 
-            internal float SurfaceHeight(float x, float z, out TerrainBiome biome)
+            internal float SurfaceHeight(double x, double z, out TerrainBiome biome)
             {
-                float climateValue = Unit(climate, x * .0018f, z * .0018f);
-                float erosionValue = Unit(erosion, x * .0025f, z * .0025f);
+                bool stableDouble = Math.Abs(x) > 1000000d || Math.Abs(z) > 1000000d;
+                float nearX = (float)x;
+                float nearZ = (float)z;
+                float climateValue = Unit(climate, settings.seed + 17,
+                    stableDouble ? x * .0018d : nearX * .0018f, stableDouble ? z * .0018d : nearZ * .0018f, 3);
+                float erosionValue = Unit(erosion, settings.seed + 71,
+                    stableDouble ? x * .0025d : nearX * .0025f, stableDouble ? z * .0025d : nearZ * .0025f, 3);
                 float mountainWeight = Smooth01((erosionValue - .52f) / .20f);
                 float desertWeight = (1f - mountainWeight) * (1f - Smooth01((climateValue - .34f) / .20f));
                 float grasslandWeight = Mathf.Max(0f, 1f - mountainWeight - desertWeight);
@@ -353,14 +359,23 @@ namespace Humanier.Terrain
                     : desertWeight > grasslandWeight ? TerrainBiome.Desert : TerrainBiome.Grassland;
                 float broadAmplitude = Blend(grassland.Broad, desert.Broad, mountains.Broad, grasslandWeight, desertWeight, mountainWeight);
                 float detailAmplitude = Blend(grassland.Detail, desert.Detail, mountains.Detail, grasslandWeight, desertWeight, mountainWeight);
-                float broadValue = (Unit(broad, x * .006f, z * .006f) - .5f) * broadAmplitude;
-                float detailValue = (Unit(detail, x * .035f, z * .035f) - .5f) * detailAmplitude;
-                float mountainShape = Mathf.Pow(Unit(mountain, x * .012f, z * .012f), 2.5f);
+                float broadValue = (Unit(broad, settings.seed, stableDouble ? x * .006d : nearX * .006f,
+                    stableDouble ? z * .006d : nearZ * .006f, 4) - .5f) * broadAmplitude;
+                float detailValue = (Unit(detail, settings.seed + 37, stableDouble ? x * .035d : nearX * .035f,
+                    stableDouble ? z * .035d : nearZ * .035f, 3) - .5f) * detailAmplitude;
+                float mountainShape = Mathf.Pow(Unit(mountain, settings.seed + 103,
+                    stableDouble ? x * .012d : nearX * .012f, stableDouble ? z * .012d : nearZ * .012f, 5), 2.5f);
                 float mountainAmplitude = Blend(grassland.Mountain, desert.Mountain, mountains.Mountain, grasslandWeight, desertWeight, mountainWeight);
-                return broadValue + detailValue + mountainShape * mountainAmplitude + TerrainGenerator.FacetSurfaceDetail(this.settings, x, z);
+                float noiseHeight = broadValue + detailValue + mountainShape * mountainAmplitude + TerrainGenerator.FacetSurfaceDetail(this.settings, (float)x, (float)z);
+                return TerrainGenerator.ApplySphericalCap(this.settings, (float)x, (float)z, noiseHeight);
             }
 
-            internal float Bedrock(float x, float z) => Unit(bedrock, x * .009f, z * .009f);
+            internal float Bedrock(double x, double z)
+            {
+                bool stableDouble = Math.Abs(x) > 1000000d || Math.Abs(z) > 1000000d;
+                return Unit(bedrock, settings.seed + 191, stableDouble ? x * .009d : (float)x * .009f,
+                    stableDouble ? z * .009d : (float)z * .009f, 3);
+            }
 
             internal void GetMaterials(TerrainBiome biome, out byte surface, out byte interior)
             {
@@ -379,7 +394,12 @@ namespace Humanier.Terrain
                 return result;
             }
 
-            private static float Unit(FastNoiseLite source, float x, float z) => (source.GetNoise(x, z) + 1f) * .5f;
+            private static float Unit(FastNoiseLite source, int seed, double x, double z, int octaves)
+            {
+                if (Math.Abs(x) <= 65536d && Math.Abs(z) <= 65536d)
+                    return (source.GetNoise((float)x, (float)z) + 1f) * .5f;
+                return TerrainGenerator.StableFractal(seed, x, z, octaves);
+            }
             private static float Smooth01(float value) { value = Mathf.Clamp01(value); return value * value * (3f - 2f * value); }
             private static float Blend(float grass, float sand, float rock, float grassWeight, float sandWeight, float rockWeight)
                 => grass * grassWeight + sand * sandWeight + rock * rockWeight;
@@ -396,6 +416,8 @@ namespace Humanier.Terrain
             private readonly float surfaceMaterialDepth;
             private readonly float facetDetailAmplitude;
             private readonly float facetDetailSpacing;
+            private readonly bool sphericalCapEnabled;
+            private readonly float sphericalCapRadius;
             private readonly TerrainBiomeKey grassland;
             private readonly TerrainBiomeKey desert;
             private readonly TerrainBiomeKey mountains;
@@ -411,6 +433,8 @@ namespace Humanier.Terrain
                 surfaceMaterialDepth = settings.surfaceMaterialDepth;
                 facetDetailAmplitude = settings.facetDetailAmplitude;
                 facetDetailSpacing = settings.facetDetailSpacing;
+                sphericalCapEnabled = settings.sphericalCapEnabled;
+                sphericalCapRadius = settings.sphericalCapRadius;
                 grassland = new TerrainBiomeKey(settings.GetBiomeDefinition(TerrainBiome.Grassland));
                 desert = new TerrainBiomeKey(settings.GetBiomeDefinition(TerrainBiome.Desert));
                 mountains = new TerrainBiomeKey(settings.GetBiomeDefinition(TerrainBiome.RockyMountains));
@@ -420,6 +444,7 @@ namespace Humanier.Terrain
                 voxelSize.Equals(other.voxelSize) && minBedrockDepth.Equals(other.minBedrockDepth) && maxBedrockDepth.Equals(other.maxBedrockDepth) &&
                 absoluteProtectionDepth.Equals(other.absoluteProtectionDepth) && surfaceMaterialDepth.Equals(other.surfaceMaterialDepth) &&
                 facetDetailAmplitude.Equals(other.facetDetailAmplitude) && facetDetailSpacing.Equals(other.facetDetailSpacing) &&
+                sphericalCapEnabled == other.sphericalCapEnabled && sphericalCapRadius.Equals(other.sphericalCapRadius) &&
                 grassland.Equals(other.grassland) && desert.Equals(other.desert) && mountains.Equals(other.mountains);
         }
 
@@ -477,7 +502,27 @@ namespace Humanier.Terrain
             float detail = (Fractal(seed + 37, x * .035f, z * .035f, 3) - .5f) * detailAmplitude;
             float mountainShape = Mathf.Pow(Fractal(seed + 103, x * .012f, z * .012f, 5), 2.5f);
             float mountainAmplitude = Blend(grassland.mountainAmplitude, desert.mountainAmplitude, mountains.mountainAmplitude, grasslandWeight, desertWeight, mountainWeight);
-            return broad + detail + mountainShape * mountainAmplitude + FacetSurfaceDetail(settings, x, z);
+            float noiseHeight = broad + detail + mountainShape * mountainAmplitude + FacetSurfaceDetail(settings, x, z);
+            return ApplySphericalCap(settings, x, z, noiseHeight);
+        }
+
+        internal static float ApplySphericalCap(TerrainWorldSettings settings, float x, float z, float noiseHeight)
+        {
+            if (settings == null || !settings.sphericalCapEnabled) return noiseHeight;
+
+            float radius = SphericalCapRadius(settings);
+            double remaining = (double)radius * radius - (double)x * x - (double)z * z;
+            const double epsilon = 0.000001d;
+            if (double.IsNaN(remaining) || remaining < epsilon) remaining = epsilon;
+            float capRise = (float)System.Math.Sqrt(remaining);
+            return noiseHeight + capRise - radius;
+        }
+
+        internal static float SphericalCapRadius(TerrainWorldSettings settings)
+        {
+            if (settings == null) return 600f;
+            float radius = settings.sphericalCapRadius;
+            return float.IsNaN(radius) || float.IsInfinity(radius) ? 600f : Mathf.Max(1f, radius);
         }
 
         public static float BedrockHeight(TerrainWorldSettings settings, float x, float z)
@@ -639,6 +684,51 @@ namespace Humanier.Terrain
                 Noises.Add(key, noise);
             }
             return (noise.GetNoise(x, z) + 1f) * .5f;
+        }
+
+        internal static float StableFractal(int seed, double x, double z, int octaves)
+        {
+            double sum = 0d;
+            double amplitude = .5d;
+            double total = 0d;
+            for (int octave = 0; octave < Math.Max(1, octaves); octave++)
+            {
+                sum += StableValueNoise(seed + octave * 1013, x, z) * amplitude;
+                total += amplitude;
+                x *= 2d;
+                z *= 2d;
+                amplitude *= .5d;
+            }
+            return (float)(sum / total);
+        }
+
+        private static double StableValueNoise(int seed, double x, double z)
+        {
+            long ix = (long)Math.Floor(x);
+            long iz = (long)Math.Floor(z);
+            double tx = x - ix;
+            double tz = z - iz;
+            tx = tx * tx * (3d - 2d * tx);
+            tz = tz * tz * (3d - 2d * tz);
+            double a = StableHash(seed, ix, iz);
+            double b = StableHash(seed, ix + 1, iz);
+            double c = StableHash(seed, ix, iz + 1);
+            double d = StableHash(seed, ix + 1, iz + 1);
+            return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * tz;
+        }
+
+        private static double StableHash(int seed, long x, long z)
+        {
+            unchecked
+            {
+                ulong h = (ulong)(uint)seed + 0x9E3779B97F4A7C15UL;
+                h ^= (ulong)x + 0x9E3779B97F4A7C15UL + (h << 6) + (h >> 2);
+                h ^= (ulong)z + 0xC2B2AE3D27D4EB4FUL + (h << 6) + (h >> 2);
+                h ^= h >> 30; h *= 0xBF58476D1CE4E5B9UL;
+                h ^= h >> 27; h *= 0x94D049BB133111EBUL;
+                h ^= h >> 31;
+                return (h >> 11) * (1d / 9007199254740991d);
+            }
         }
         private static float Smooth01(float t) { t = Mathf.Clamp01(t); return t * t * (3f - 2f * t); }
 

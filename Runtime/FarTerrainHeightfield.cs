@@ -296,7 +296,9 @@ namespace Humanier.Terrain
                 coverageDirty = true;
                 return;
             }
-            dirtyCoverageColumns.Add(new Vector2Int(id.x, id.z));
+            // The optional far heightfield is disabled for InfiniteCurved worlds;
+            // legacy flat worlds retain its int-addressed coverage mask.
+            dirtyCoverageColumns.Add(new Vector2Int(checked((int)id.x), checked((int)id.z)));
         }
 
         private void OnEditSummaryCommitted(TerrainEditSummary summary)

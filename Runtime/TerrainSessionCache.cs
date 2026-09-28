@@ -7,12 +7,14 @@ namespace Humanier.Terrain
 {
     internal sealed class TerrainSessionCache
     {
-        private const int FormatMarker = 0x48545231; // HTR1
+        private const int FormatMarker = 0x48545232; // HTR2
         private readonly string directory;
         public string LastError { get; private set; }
-        public TerrainSessionCache(int seed, string sessionId)
+        public TerrainSessionCache(int seed, string sessionId, TerrainTopology topology = TerrainTopology.Flat,
+            int generatorVersion = 2)
         {
-            directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain", seed.ToString(), sessionId);
+            directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain",
+                $"v{generatorVersion}_{topology}_{seed}", sessionId);
         }
         public bool Save(TerrainChunkData data)
         {

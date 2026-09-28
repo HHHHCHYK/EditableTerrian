@@ -36,11 +36,11 @@ namespace Humanier.Terrain
         private readonly Queue<PendingEdit> editQueue = new Queue<PendingEdit>();
         private readonly List<ChunkPriority> streamingPlan = new List<ChunkPriority>();
         private readonly List<StreamingGroup> streamingGroups = new List<StreamingGroup>();
-        private readonly List<Vector2Int> streamingColumns = new List<Vector2Int>();
+        private readonly List<ColumnKey> streamingColumns = new List<ColumnKey>();
         // Surface ranges are stable for a world seed/settings pair. Keeping the
         // ranges separately lets a focus move rebuild only the new outer ring;
         // existing columns do not need to resample procedural noise.
-        private readonly Dictionary<Vector2Int, TerrainSurfaceRange> streamingColumnRanges = new Dictionary<Vector2Int, TerrainSurfaceRange>();
+        private readonly Dictionary<ColumnKey, TerrainSurfaceRange> streamingColumnRanges = new Dictionary<ColumnKey, TerrainSurfaceRange>();
         private readonly List<TerrainChunkId> lodRelaxationScratch = new List<TerrainChunkId>();
         private readonly Queue<LoadedChunk> meshBuildQueue = new Queue<LoadedChunk>();
         private readonly List<LoadedChunk> inFlightMeshBuilds = new List<LoadedChunk>();
@@ -50,6 +50,8 @@ namespace Humanier.Terrain
         private TerrainWorldSettings generatedSettings;
         private Material generatedMaterial;
         private Vector3 originOffset;
+        private CurvedWorldFrame curvedFrame;
+        private int curvedFrameRevision;
         private bool cacheWriteBlocked;
         private bool processingEdit;
         private bool initialized;
@@ -78,6 +80,13 @@ namespace Humanier.Terrain
             }
         }
         public Vector3 OriginOffset => originOffset;
+        public TerrainTopology Topology => Settings.topology;
+        public bool UsesCurvedTopology => Settings.topology == TerrainTopology.InfiniteCurved || Settings.sphericalCapEnabled;
+        public CurvedWorldFrame CurvedFrame => curvedFrame;
+        /// <summary>The sphere centre in this world's scene-space coordinates, including origin rebasing.</summary>
+        public Vector3 SphereCenter => Settings.topology == TerrainTopology.InfiniteCurved && curvedFrame != null
+            ? curvedFrame.SceneSphereCenter
+            : new Vector3(0f, -TerrainGenerator.SphericalCapRadius(Settings), 0f) - originOffset;
         public bool CacheWriteBlocked => cacheWriteBlocked;
         public string CacheError => cache == null ? null : cache.LastError;
         public event Action<string> CacheWriteFailed;
@@ -87,6 +96,8 @@ namespace Humanier.Terrain
         public event Action<TerrainChunkId> ChunkUnloaded;
         /// <summary>Scene-space compensation applied when the global origin changes.</summary>
         public event Action<Vector3> OriginOffsetChanged;
+        /// <summary>Raised synchronously after resident terrain received an old-scene to new-scene rigid transform.</summary>
+        public event Action<CurvedWorldFrameShift> FrameShifted;
         /// <summary>Raised after a terrain edit's density transaction is committed.</summary>
         /// <summary>Raised after a non-empty edit; center is in the public scene-space coordinate system.</summary>
         public event Action<Vector3, float> EditCommitted;
@@ -108,6 +119,8 @@ namespace Humanier.Terrain
             public int meshRevision;
             public int pendingMeshRevision;
             public int appliedMeshRevision = -1;
+            public int pendingFrameRevision;
+            public int appliedFrameRevision;
             public MeshSignature desiredMesh;
             public bool hasDesiredMesh;
         }
@@ -182,11 +195,11 @@ namespace Humanier.Terrain
         }
         private readonly struct ColumnKey : IEquatable<ColumnKey>
         {
-            public readonly int x;
-            public readonly int z;
+            public readonly long x;
+            public readonly long z;
             private readonly bool valid;
 
-            public ColumnKey(int x, int z)
+            public ColumnKey(long x, long z)
             {
                 this.x = x;
                 this.z = z;
@@ -196,12 +209,12 @@ namespace Humanier.Terrain
             public bool IsValid => valid;
             public bool Equals(ColumnKey other) => valid == other.valid && (!valid || (x == other.x && z == other.z));
             public override bool Equals(object obj) => obj is ColumnKey other && Equals(other);
-            public override int GetHashCode() { unchecked { return valid ? (x * 397) ^ z : 0; } }
+            public override int GetHashCode() { unchecked { return valid ? (x.GetHashCode() * 397) ^ z.GetHashCode() : 0; } }
         }
         private sealed class StreamingGroup
         {
-            public int x;
-            public int z;
+            public long x;
+            public long z;
             public int minY;
             public int maxY;
             public float distanceSquared;
@@ -233,19 +246,21 @@ namespace Humanier.Terrain
             EnsureInitialized();
             ApplyCompletedMeshes();
             ScheduleMeshBuilds();
-            if (focus != null && !cacheWriteBlocked) UpdateStreamingPlan(focus.position + originOffset);
+            if (focus != null && Settings.topology == TerrainTopology.InfiniteCurved) TryRebaseCurvedWorld(focus.position);
+            Vector3 logicalFocus = focus == null ? Vector3.zero : SceneToLogicalVector(focus.position);
+            if (focus != null && !cacheWriteBlocked) UpdateStreamingPlan(logicalFocus);
             int buildCount = Settings.chunksBuiltPerFrame;
             while (!cacheWriteBlocked && buildCount-- > 0 && requestedChunks.Count > 0)
             {
                 TerrainChunkId id = requestedChunks.Dequeue(); queuedChunks.Remove(id);
-                if (!chunks.ContainsKey(id) && !CreateChunk(id, focus == null ? Vector3.zero : focus.position + originOffset, true))
+                if (!chunks.ContainsKey(id) && !CreateChunk(id, logicalFocus, true))
                 {
                     QueueChunk(id);
                     break;
                 }
             }
             ScheduleMeshBuilds();
-            if (++frameCounter % 30 == 0 && focus != null) UpdateLodsAndEvict(focus.position + originOffset);
+            if (++frameCounter % 30 == 0 && focus != null) UpdateLodsAndEvict(logicalFocus);
             // Refresh far coverage after near meshes have been applied and any
             // streaming eviction has completed. This keeps the mask aligned with
             // what is actually rendered during this frame, rather than waiting
@@ -311,6 +326,62 @@ namespace Humanier.Terrain
             OriginOffsetChanged?.Invoke(compensation);
         }
 
+        public InfiniteWorldPosition SceneToLogical(Vector3 scenePosition)
+        {
+            EnsureInitialized();
+            if (Settings.topology == TerrainTopology.InfiniteCurved)
+                return curvedFrame.SceneToLogical(scenePosition);
+            return curvedFrame.FromLogical(scenePosition.x + originOffset.x, scenePosition.z + originOffset.z,
+                scenePosition.y + originOffset.y);
+        }
+
+        public Vector3 LogicalToScene(InfiniteWorldPosition logicalPosition)
+        {
+            EnsureInitialized();
+            if (Settings.topology == TerrainTopology.InfiniteCurved)
+                return curvedFrame.LogicalToScene(logicalPosition);
+            return new Vector3((float)logicalPosition.LogicalX(Settings.ChunkSize) - originOffset.x,
+                (float)logicalPosition.radialHeight - originOffset.y,
+                (float)logicalPosition.LogicalZ(Settings.ChunkSize) - originOffset.z);
+        }
+
+        /// <summary>Convenience conversion for systems whose logical position still fits in a Vector3.</summary>
+        public Vector3 LogicalToScene(Vector3 logicalPosition)
+        {
+            EnsureInitialized();
+            return LogicalVectorToScene(logicalPosition);
+        }
+
+        /// <summary>Returns the current logical point as a Vector3 for local streaming systems.</summary>
+        public Vector3 SceneToLogicalPoint(Vector3 scenePosition)
+        {
+            EnsureInitialized();
+            return SceneToLogicalVector(scenePosition);
+        }
+
+        public Vector3 UpAt(Vector3 scenePosition) => SampleUpDirection(scenePosition);
+
+        public bool TryRebaseCurvedWorld(Vector3 sceneFocus)
+        {
+            if (Settings.topology != TerrainTopology.InfiniteCurved || curvedFrame == null) return false;
+            Vector3 focusUp = curvedFrame.UpAt(sceneFocus);
+            float arcFromAnchor = Vector3.Angle(Vector3.up, focusUp) * Mathf.Deg2Rad * (float)curvedFrame.Radius;
+            if (arcFromAnchor < Settings.relocationThreshold) return false;
+            InfiniteWorldPosition nextAnchor = curvedFrame.SceneToLogical(sceneFocus);
+            CurvedWorldFrameShift shift = curvedFrame.Reanchor(nextAnchor);
+            curvedFrameRevision++;
+            foreach (LoadedChunk chunk in chunks.Values)
+            {
+                Transform chunkTransform = chunk.gameObject.transform;
+                chunkTransform.SetPositionAndRotation(shift.TransformPoint(chunkTransform.position),
+                    shift.Rotation * chunkTransform.rotation);
+            }
+            originOffset = new Vector3((float)nextAnchor.LogicalX(Settings.ChunkSize), 0f,
+                (float)nextAnchor.LogicalZ(Settings.ChunkSize));
+            FrameShifted?.Invoke(shift);
+            return true;
+        }
+
         /// <summary>Copies resident IDs without generating terrain or reading the session cache.</summary>
         public void CopyLoadedChunkIds(List<TerrainChunkId> destination)
         {
@@ -346,19 +417,55 @@ namespace Humanier.Terrain
         public TerrainBiome SampleBiome(Vector3 worldPosition)
         {
             GetGenerationContext().Validate();
-            return TerrainGenerator.SampleBiome(Settings.seed, worldPosition.x + originOffset.x, worldPosition.z + originOffset.z);
+            Vector3 logical = SceneToLogicalVector(worldPosition);
+            return TerrainGenerator.SampleBiome(Settings.seed, logical.x, logical.z);
         }
         public byte SampleSurfaceMaterial(Vector3 worldPosition)
         {
             GetGenerationContext().Validate();
-            return TerrainGenerator.SurfaceMaterialAt(Settings, worldPosition.x + originOffset.x, worldPosition.z + originOffset.z);
+            Vector3 logical = SceneToLogicalVector(worldPosition);
+            return TerrainGenerator.SurfaceMaterialAt(Settings, logical.x, logical.z);
         }
         public float SampleSurfaceHeight(Vector3 worldPosition)
         {
             GetGenerationContext().Validate();
-            return TerrainGenerator.SurfaceHeight(Settings, worldPosition.x + originOffset.x, worldPosition.z + originOffset.z) - originOffset.y;
+            if (Settings.topology == TerrainTopology.InfiniteCurved)
+            {
+                EnsureInitialized();
+                double radius = curvedFrame.Radius;
+                double sceneRadius = Math.Sqrt((double)worldPosition.x * worldPosition.x +
+                                               (double)worldPosition.z * worldPosition.z);
+                InfiniteWorldPosition anchor = curvedFrame.Anchor;
+                double anchorX = anchor.LogicalX(Settings.ChunkSize);
+                double anchorZ = anchor.LogicalZ(Settings.ChunkSize);
+                double directionX = sceneRadius > 1e-9 ? worldPosition.x / sceneRadius : 0d;
+                double directionZ = sceneRadius > 1e-9 ? worldPosition.z / sceneRadius : 0d;
+                double arc = Math.Asin(Math.Min(1d, sceneRadius / radius)) * radius;
+                float curvedHeight = 0f;
+                for (int i = 0; i < 3; i++)
+                {
+                    double logicalX = anchorX + directionX * arc;
+                    double logicalZ = anchorZ + directionZ * arc;
+                    curvedHeight = TerrainGenerator.SurfaceHeight(Settings, (float)logicalX, (float)logicalZ);
+                    arc = Math.Asin(Math.Min(1d, sceneRadius / Math.Max(1d, radius + curvedHeight))) * radius;
+                }
+                return curvedFrame.LogicalToScene(anchorX + directionX * arc,
+                    anchorZ + directionZ * arc, curvedHeight).y;
+            }
+            Vector3 logical = SceneToLogicalVector(worldPosition);
+            float height = TerrainGenerator.SurfaceHeight(Settings, logical.x, logical.z);
+            return height - originOffset.y;
         }
-        public TerrainChunkId GetChunkId(Vector3 worldPosition) => WorldToChunk(worldPosition + originOffset);
+        public Vector3 SampleUpDirection(Vector3 worldPosition)
+        {
+            GetGenerationContext().Validate();
+            if (Settings.topology == TerrainTopology.InfiniteCurved) return curvedFrame.UpAt(worldPosition);
+            if (!Settings.sphericalCapEnabled) return Vector3.up;
+            Vector3 globalPosition = worldPosition + originOffset;
+            Vector3 direction = globalPosition - new Vector3(0f, -TerrainGenerator.SphericalCapRadius(Settings), 0f);
+            return direction.sqrMagnitude > 0f ? direction.normalized : Vector3.up;
+        }
+        public TerrainChunkId GetChunkId(Vector3 worldPosition) => WorldToChunk(SceneToLogicalVector(worldPosition));
         public float SampleDensity(Vector3 worldPosition)
         {
             if (!TrySampleDensity(worldPosition, out float density))
@@ -369,14 +476,14 @@ namespace Humanier.Terrain
         public float SampleGeneratedDensity(Vector3 worldPosition)
         {
             GetGenerationContext().Validate();
-            Vector3 globalPosition = worldPosition + originOffset;
+            Vector3 globalPosition = SceneToLogicalVector(worldPosition);
             return TerrainGenerator.InitialDensity(Settings, globalPosition);
         }
 
         public bool TrySampleDensity(Vector3 worldPosition, out float density)
         {
             EnsureInitialized();
-            Vector3 globalPosition = worldPosition + originOffset;
+            Vector3 globalPosition = SceneToLogicalVector(worldPosition);
             TerrainChunkId id = WorldToChunk(globalPosition);
             if (chunks.TryGetValue(id, out LoadedChunk chunk))
             {
@@ -399,7 +506,7 @@ namespace Humanier.Terrain
         }
         public bool IsCollisionReady(Vector3 worldPosition)
         {
-            TerrainChunkId id = WorldToChunk(worldPosition + originOffset);
+            TerrainChunkId id = WorldToChunk(SceneToLogicalVector(worldPosition));
             return chunks.TryGetValue(id, out LoadedChunk chunk) && chunk.collider != null && chunk.appliedMeshRevision == chunk.meshRevision;
         }
 
@@ -433,8 +540,12 @@ namespace Humanier.Terrain
                 (!IsFinite(request.maxAddedSolidVolume.Value) || request.maxAddedSolidVolume.Value < 0f))
             { handle.Status = TerrainEditStatus.Rejected; handle.Error = "maxAddedSolidVolume must be finite and non-negative."; handle.Notify(); return handle; }
             if (editQueue.Count >= Settings.maxQueuedEdits) { handle.Status = TerrainEditStatus.Rejected; handle.Error = "Terrain edit queue is full."; handle.Notify(); return handle; }
-            request.worldCenter += originOffset;
-            if (request.mode == TerrainBrushMode.Flatten) request.flattenHeight += originOffset.y;
+            Vector3 sceneRequestCenter = request.worldCenter;
+            Vector3 logicalCenter = SceneToLogicalVector(sceneRequestCenter);
+            request.worldCenter = logicalCenter;
+            if (request.mode == TerrainBrushMode.Flatten)
+                request.flattenHeight = SceneToLogicalVector(
+                    new Vector3(sceneRequestCenter.x, request.flattenHeight, sceneRequestCenter.z)).y;
             editQueue.Enqueue(new PendingEdit { request = request, handle = handle });
             if (!processingEdit) StartCoroutine(ProcessEdits());
             return handle;
@@ -573,15 +684,17 @@ namespace Humanier.Terrain
             {
                 // Requests are converted to global coordinates before staging. Publish
                 // the public scene-space center so consumers remain stable across origin shifts.
-                try { if (plans.Count > 0) EditCommitted?.Invoke(request.worldCenter - originOffset, request.radius); }
+                Vector3 sceneCenter = LogicalVectorToScene(request.worldCenter);
+                try { if (plans.Count > 0) EditCommitted?.Invoke(sceneCenter, request.radius); }
                 catch (Exception exception) { Debug.LogException(exception, this); }
                 try
                 {
                     if (plans.Count > 0)
                     {
                         EditSummaryCommitted?.Invoke(new TerrainEditSummary(
-                            request.mode, request.worldCenter - originOffset, request.radius, effectiveStrength,
-                            request.flattenHeight - originOffset.y, (float)removedVolume, (float)addedVolume,
+                            request.mode, sceneCenter, request.radius, effectiveStrength,
+                            LogicalVectorToScene(new Vector3(request.worldCenter.x, request.flattenHeight, request.worldCenter.z)).y,
+                            (float)removedVolume, (float)addedVolume,
                             removedMaterialVolumes));
                     }
                 }
@@ -748,6 +861,9 @@ namespace Humanier.Terrain
             float voxelSize = Settings.voxelSize;
             float radius = Mathf.Clamp(request.radius, .1f, 64f);
             float radiusSquared = radius * radius;
+            Vector3 sceneBrushCenter = Settings.topology == TerrainTopology.InfiniteCurved
+                ? LogicalVectorToScene(request.worldCenter)
+                : request.worldCenter;
             GetEditSampleBounds(request.worldCenter, radius, voxelSize,
                 out int minGlobalX, out int maxGlobalX, out int minGlobalY,
                 out int maxGlobalY, out int minGlobalZ, out int maxGlobalZ);
@@ -779,7 +895,10 @@ namespace Humanier.Terrain
                     if (column.IsProtected(Settings, point.y)) continue;
 
                     float deltaY = point.y - request.worldCenter.y;
-                    float distance = Mathf.Sqrt(horizontalSquared + deltaY * deltaY);
+                    float distance = Settings.topology == TerrainTopology.InfiniteCurved
+                        ? Vector3.Distance(LogicalVectorToScene(point), sceneBrushCenter)
+                        : Mathf.Sqrt(horizontalSquared + deltaY * deltaY);
+                    if (distance > radius) continue;
                     float before = chunk.data.GetDensity(localX, localY, localZ);
                     EvaluateEditSample(Settings, before, point, request, radius, distance, out float target, out float blend);
                     result.Add(new Vector3Int(globalX, globalY, globalZ),
@@ -830,9 +949,9 @@ namespace Humanier.Terrain
             {
                 LoadedChunk chunk = stagedChunks[chunkIndex];
                 TerrainChunkData data = chunk.data;
-                int chunkOriginX = data.Id.x * resolution;
+                int chunkOriginX = checked((int)(data.Id.x * resolution));
                 int chunkOriginY = data.Id.y * resolution;
-                int chunkOriginZ = data.Id.z * resolution;
+                int chunkOriginZ = checked((int)(data.Id.z * resolution));
                 int minX = Mathf.Max(0, minGlobalX - chunkOriginX);
                 int maxX = Mathf.Min(resolution, maxGlobalX - chunkOriginX);
                 int minY = Mathf.Max(0, minGlobalY - chunkOriginY);
@@ -1003,22 +1122,22 @@ namespace Humanier.Terrain
             for (int x = -radius; x <= radius; x++)
             {
                 if (x * x + z * z <= horizontalSquared || x * x + z * z <= nearRadiusSquared)
-                    streamingColumns.Add(new Vector2Int(center.x + x, center.z + z));
+                    streamingColumns.Add(new ColumnKey(center.x + x, center.z + z));
             }
             streamingColumns.Sort((a, b) =>
             {
-                int aX = a.x - center.x, aZ = a.y - center.z;
-                int bX = b.x - center.x, bZ = b.y - center.z;
+                long aX = a.x - center.x, aZ = a.z - center.z;
+                long bX = b.x - center.x, bZ = b.z - center.z;
                 int distance = (aX * aX + aZ * aZ).CompareTo(bX * bX + bZ * bZ);
                 if (distance != 0) return distance;
                 distance = a.x.CompareTo(b.x);
-                return distance != 0 ? distance : a.y.CompareTo(b.y);
+                return distance != 0 ? distance : a.z.CompareTo(b.z);
             });
             if (streamingColumnRanges.Count > 0)
             {
-                var active = new HashSet<Vector2Int>(streamingColumns);
-                var stale = new List<Vector2Int>();
-                foreach (Vector2Int key in streamingColumnRanges.Keys)
+                var active = new HashSet<ColumnKey>(streamingColumns);
+                var stale = new List<ColumnKey>();
+                foreach (ColumnKey key in streamingColumnRanges.Keys)
                     if (!active.Contains(key)) stale.Add(key);
                 for (int i = 0; i < stale.Count; i++) streamingColumnRanges.Remove(stale[i]);
             }
@@ -1040,13 +1159,13 @@ namespace Humanier.Terrain
                 : Time.realtimeSinceStartup + Mathf.Max(.25f, Settings.streamingPlanningBudgetMs) * .001f;
             while (streamingColumnIndex < streamingColumns.Count && processed < budget)
             {
-                Vector2Int column = streamingColumns[streamingColumnIndex];
-                int offsetX = column.x - plannedFocusChunk.x;
-                int offsetZ = column.y - plannedFocusChunk.z;
-                int distanceSquared = offsetX * offsetX + offsetZ * offsetZ;
+                ColumnKey column = streamingColumns[streamingColumnIndex];
+                long offsetX = column.x - plannedFocusChunk.x;
+                long offsetZ = column.z - plannedFocusChunk.z;
+                long distanceSquared = offsetX * offsetX + offsetZ * offsetZ;
                 if (distanceSquared <= horizontalSquared)
                 {
-                    var id = new TerrainChunkId(column.x, 0, column.y);
+                    var id = new TerrainChunkId(column.x, 0, column.z);
                     if (!streamingColumnRanges.TryGetValue(column, out TerrainSurfaceRange range))
                     {
                         float remainingMs = Mathf.Max(.01f, (budgetDeadline - Time.realtimeSinceStartup) * 1000f);
@@ -1064,11 +1183,11 @@ namespace Humanier.Terrain
                     float safety = Settings.voxelSize;
                     int minY = Mathf.FloorToInt((range.MinHeight - safety) / Settings.ChunkSize);
                     int maxY = Mathf.FloorToInt((range.MaxHeight + safety) / Settings.ChunkSize);
-                    AddStreamingGroup(column.x, column.y, minY, maxY, planFocus);
+                    AddStreamingGroup(column.x, column.z, minY, maxY, planFocus);
                 }
                 if (distanceSquared <= nearRadiusSquared)
                 {
-                    AddStreamingGroup(column.x, column.y, plannedFocusChunk.y - verticalChunksBelowFocus, plannedFocusChunk.y + verticalChunksAboveFocus, planFocus);
+                    AddStreamingGroup(column.x, column.z, plannedFocusChunk.y - verticalChunksBelowFocus, plannedFocusChunk.y + verticalChunksAboveFocus, planFocus);
                 }
                 streamingColumnIndex++;
                 processed++;
@@ -1077,7 +1196,7 @@ namespace Humanier.Terrain
             if (processed > 0) RebuildStreamingPlan();
         }
 
-        private void AddStreamingGroup(int x, int z, int minY, int maxY, Vector3 planFocus)
+        private void AddStreamingGroup(long x, long z, int minY, int maxY, Vector3 planFocus)
         {
             if (maxY < minY) { int swap = minY; minY = maxY; maxY = swap; }
             float distance = float.MaxValue;
@@ -1213,9 +1332,10 @@ namespace Humanier.Terrain
                 Mesh next = request.Complete();
                 activeMeshBuilds--;
                 bool current = request.Version == chunk.data.Version && chunk.pendingMeshRevision == chunk.meshRevision;
+                int meshFrameRevision = chunk.pendingFrameRevision;
                 request.Dispose();
                 if (!current) { if (next != null) Destroy(next); QueueMeshBuild(chunk); continue; }
-                AssignMesh(chunk, next, chunk.pendingMeshRevision);
+                AssignMesh(chunk, next, chunk.pendingMeshRevision, meshFrameRevision);
                 remaining--;
             }
         }
@@ -1240,33 +1360,43 @@ namespace Humanier.Terrain
                 if (!chunk.isLoaded || chunk.pendingMesh != null || !chunk.meshDirty) continue;
                 chunk.meshDirty = false;
                 chunk.pendingMeshRevision = chunk.meshRevision;
-                chunk.pendingMesh = TerrainMeshBuilder.Schedule(chunk.data, originOffset, chunk.lod, GetTransitionFaces(chunk.data.Id, chunk.lod), chunk.data.Version, meshResources);
+                chunk.pendingFrameRevision = curvedFrameRevision;
+                chunk.pendingMesh = TerrainMeshBuilder.Schedule(chunk.data, originOffset, chunk.lod,
+                    GetTransitionFaces(chunk.data.Id, chunk.lod), chunk.data.Version, meshResources,
+                    Settings.topology == TerrainTopology.InfiniteCurved ? curvedFrame : null);
                 inFlightMeshBuilds.Add(chunk);
                 activeMeshBuilds++;
             }
         }
-        private void AssignMesh(LoadedChunk chunk, Mesh next, int appliedRevision)
+        private void AssignMesh(LoadedChunk chunk, Mesh next, int appliedRevision, int meshFrameRevision)
         {
             using var profileScope = AssignMeshMarker.Auto();
             Mesh old = chunk.filter.sharedMesh;
-            chunk.gameObject.transform.localPosition = Vector3.zero;
+            if (Settings.topology != TerrainTopology.InfiniteCurved || meshFrameRevision == curvedFrameRevision)
+            {
+                chunk.gameObject.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
+            }
             chunk.filter.sharedMesh = next;
             if (chunk.collider != null) chunk.collider.sharedMesh = next;
             chunk.appliedMeshRevision = appliedRevision;
+            chunk.appliedFrameRevision = meshFrameRevision;
             if (old != null) Destroy(old);
             ChunkMeshApplied?.Invoke(chunk.data.Id);
         }
         private TerrainChunkId WorldToChunk(Vector3 globalPosition)
         {
             float size = Settings.ChunkSize;
-            return new TerrainChunkId(Mathf.FloorToInt(globalPosition.x / size), Mathf.FloorToInt(globalPosition.y / size), Mathf.FloorToInt(globalPosition.z / size));
+            return new TerrainChunkId((long)Math.Floor((double)globalPosition.x / size),
+                Mathf.FloorToInt(globalPosition.y / size), (long)Math.Floor((double)globalPosition.z / size));
         }
 
         private int GetLod(TerrainChunkId id)
         {
             if (focus == null) return Mathf.Clamp(Settings.minimumMeshLod, 0, 3);
-            Vector3 point = new Vector3((id.x + .5f) * Settings.ChunkSize, (id.y + .5f) * Settings.ChunkSize, (id.z + .5f) * Settings.ChunkSize);
-            float distance = Vector2.Distance(new Vector2(point.x, point.z), new Vector2(focus.position.x + originOffset.x, focus.position.z + originOffset.z));
+            Vector3 point = new Vector3((float)((id.x + .5d) * Settings.ChunkSize), (id.y + .5f) * Settings.ChunkSize,
+                (float)((id.z + .5d) * Settings.ChunkSize));
+            Vector3 logicalFocus = SceneToLogicalVector(focus.position);
+            float distance = Vector2.Distance(new Vector2(point.x, point.z), new Vector2(logicalFocus.x, logicalFocus.z));
             int lod = 0;
             foreach (float threshold in Settings.lodDistances) { if (distance >= threshold) lod++; else break; }
             return Mathf.Clamp(Mathf.Max(lod, Settings.minimumMeshLod), 0, 3);
@@ -1281,7 +1411,7 @@ namespace Humanier.Terrain
             foreach (KeyValuePair<TerrainChunkId, LoadedChunk> pair in chunks)
             {
                 LoadedChunk chunk = pair.Value;
-                float cx = (pair.Key.x + .5f) * Settings.ChunkSize, cz = (pair.Key.z + .5f) * Settings.ChunkSize;
+                float cx = (float)((pair.Key.x + .5d) * Settings.ChunkSize), cz = (float)((pair.Key.z + .5d) * Settings.ChunkSize);
                 float distance = Vector2.Distance(new Vector2(cx, cz), new Vector2(globalFocus.x, globalFocus.z));
                 if (distance > unloadDistance)
                 {
@@ -1434,7 +1564,8 @@ namespace Humanier.Terrain
             return furthestId;
         }
 
-        private Vector3 ChunkCenter(TerrainChunkId id) => new Vector3((id.x + .5f) * Settings.ChunkSize, (id.y + .5f) * Settings.ChunkSize, (id.z + .5f) * Settings.ChunkSize);
+        private Vector3 ChunkCenter(TerrainChunkId id) => new Vector3((float)((id.x + .5d) * Settings.ChunkSize),
+            (id.y + .5f) * Settings.ChunkSize, (float)((id.z + .5d) * Settings.ChunkSize));
 
         private void AddStreamingCandidate(Dictionary<TerrainChunkId, float> candidates, TerrainChunkId id, Vector3 focusPoint)
         {
@@ -1455,6 +1586,8 @@ namespace Humanier.Terrain
         private void EnsureInitialized()
         {
             EnsureSettings();
+            if (curvedFrame == null)
+                curvedFrame = new CurvedWorldFrame(Settings.curvedWorldRadius, Settings.ChunkSize);
             if (generation == null) generation = new TerrainGenerationContext(Settings);
             generation.Validate();
             if (meshResources == null) meshResources = new TerrainMeshResources();
@@ -1468,7 +1601,7 @@ namespace Humanier.Terrain
                 generatedMaterial = new Material(shader) { name = "Runtime Terrain Material" };
             }
 
-            cache = new TerrainSessionCache(Settings.seed, Guid.NewGuid().ToString("N"));
+            cache = new TerrainSessionCache(Settings.seed, Guid.NewGuid().ToString("N"), Settings.topology, 2);
             if (Settings.farHeightfieldEnabled)
             {
                 GameObject farObject = new GameObject("FarTerrainHeightfield");
@@ -1648,6 +1781,22 @@ namespace Humanier.Terrain
 
         private static bool IsFinite(Vector3 value) => IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
         private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+
+        private Vector3 SceneToLogicalVector(Vector3 scenePosition)
+        {
+            if (Settings.topology != TerrainTopology.InfiniteCurved)
+                return scenePosition + originOffset;
+            InfiniteWorldPosition logical = curvedFrame.SceneToLogical(scenePosition);
+            return new Vector3((float)logical.LogicalX(Settings.ChunkSize), (float)logical.radialHeight,
+                (float)logical.LogicalZ(Settings.ChunkSize));
+        }
+
+        private Vector3 LogicalVectorToScene(Vector3 logicalPosition)
+        {
+            if (Settings.topology != TerrainTopology.InfiniteCurved)
+                return logicalPosition - originOffset;
+            return curvedFrame.LogicalToScene(logicalPosition.x, logicalPosition.z, logicalPosition.y);
+        }
     }
 
     internal sealed class TerrainChunkMarker : MonoBehaviour

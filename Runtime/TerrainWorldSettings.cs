@@ -32,6 +32,20 @@ namespace Humanier.Terrain
         public float[] lodDistances = { 64f, 128f, 256f };
         [Tooltip("Minimum mesh LOD used for resident chunks. One step doubles the surface sampling stride without changing the density grid.")]
         [Range(0, 3)] public int minimumMeshLod;
+        [Header("世界拓扑")]
+        [InspectorName("地形拓扑")] public TerrainTopology topology = TerrainTopology.Flat;
+        [InspectorName("无限曲面半径"), Min(32f)] public float curvedWorldRadius = 600f;
+        [InspectorName("曲面重定位阈值"), Min(8f)] public float relocationThreshold = 32f;
+        [Header("球冠地形")]
+        [InspectorName("启用球冠地形")] public bool sphericalCapEnabled;
+        [InspectorName("球冠半径")]
+        [Min(1f)] public float sphericalCapRadius = 600f;
+        [Header("无限弧形地平线")]
+        [Tooltip("只弯曲远处地形的显示，地形碰撞、挖掘和重力仍使用无限平面坐标。")]
+        [InspectorName("启用无限视觉曲率")] public bool infiniteVisualCurvatureEnabled;
+        [Tooltip("数值越小，地平线弧度越明显。")]
+        [InspectorName("视觉曲率半径")]
+        [Min(32f)] public float infiniteVisualCurvatureRadius = 600f;
         [Header("Low-poly Surface")]
         [Min(0f)] public float facetDetailAmplitude;
         [Min(0.5f)] public float facetDetailSpacing = 2f;
@@ -75,6 +89,15 @@ namespace Humanier.Terrain
             absoluteProtectionDepth = Mathf.Max(60f, absoluteProtectionDepth);
             if (lodDistances == null || lodDistances.Length == 0) lodDistances = new[] { 64f, 128f, 256f };
             minimumMeshLod = Mathf.Clamp(minimumMeshLod, 0, 3);
+            curvedWorldRadius = float.IsFinite(curvedWorldRadius) ? Mathf.Max(32f, curvedWorldRadius) : 600f;
+            relocationThreshold = float.IsFinite(relocationThreshold) ? Mathf.Clamp(relocationThreshold, 8f, curvedWorldRadius * .25f) : 32f;
+            sphericalCapRadius = float.IsNaN(sphericalCapRadius) || float.IsInfinity(sphericalCapRadius)
+                ? 600f
+                : Mathf.Max(1f, sphericalCapRadius);
+            infiniteVisualCurvatureRadius = float.IsNaN(infiniteVisualCurvatureRadius) ||
+                                            float.IsInfinity(infiniteVisualCurvatureRadius)
+                ? 600f
+                : Mathf.Max(32f, infiniteVisualCurvatureRadius);
             facetDetailAmplitude = Mathf.Max(0f, facetDetailAmplitude);
             facetDetailSpacing = Mathf.Max(0.5f, facetDetailSpacing);
             maxInFlightMeshBuilds = Mathf.Max(1, maxInFlightMeshBuilds);

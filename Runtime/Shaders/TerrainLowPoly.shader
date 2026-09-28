@@ -49,8 +49,9 @@ Shader "Humanier/Terrain Low Poly"
                 Varyings output;
                 float3 positionOS = input.positionOS.xyz;
                 positionOS.y += _FarHeightOffset;
-                output.positionCS = TransformObjectToHClip(positionOS);
-                output.positionWS = TransformObjectToWorld(positionOS);
+                float3 positionWS = TransformObjectToWorld(positionOS);
+                output.positionCS = TransformWorldToHClip(positionWS);
+                output.positionWS = positionWS;
                 output.normalWS = TransformObjectToWorldNormal(input.normalOS);
                 output.color = input.color.rgb;
                 return output;

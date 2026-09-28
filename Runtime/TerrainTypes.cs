@@ -6,19 +6,85 @@ namespace Humanier.Terrain
     public enum TerrainBiome { Grassland, Desert, RockyMountains }
     public enum TerrainBrushMode { Dig, Fill, Flatten }
     public enum TerrainEditStatus { Queued, Processing, Completed, Rejected, CacheFailure, Cancelled }
+    public enum TerrainTopology { Flat, InfiniteCurved }
 
     [Serializable]
     public struct TerrainChunkId : IEquatable<TerrainChunkId>
     {
-        public int x;
+        public long x;
         public int y;
-        public int z;
+        public long z;
 
-        public TerrainChunkId(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
+        public TerrainChunkId(long x, int y, long z) { this.x = x; this.y = y; this.z = z; }
         public bool Equals(TerrainChunkId other) => x == other.x && y == other.y && z == other.z;
         public override bool Equals(object obj) => obj is TerrainChunkId other && Equals(other);
-        public override int GetHashCode() { unchecked { return ((x * 397) ^ y) * 397 ^ z; } }
+        public override int GetHashCode() { unchecked { return ((x.GetHashCode() * 397) ^ y) * 397 ^ z.GetHashCode(); } }
         public override string ToString() => $"({x}, {y}, {z})";
+    }
+
+    internal readonly struct TerrainColumnId : IEquatable<TerrainColumnId>
+    {
+        public readonly long x;
+        public readonly long z;
+        public TerrainColumnId(long x, long z) { this.x = x; this.z = z; }
+        public bool Equals(TerrainColumnId other) => x == other.x && z == other.z;
+        public override bool Equals(object obj) => obj is TerrainColumnId other && Equals(other);
+        public override int GetHashCode() { unchecked { return (x.GetHashCode() * 397) ^ z.GetHashCode(); } }
+    }
+
+    /// <summary>Stable logical address for the endless world. Horizontal chunk coordinates never rebase.</summary>
+    [Serializable]
+    public readonly struct InfiniteWorldPosition : IEquatable<InfiniteWorldPosition>
+    {
+        public readonly long chunkX;
+        public readonly long chunkZ;
+        public readonly double localX;
+        public readonly double localZ;
+        public readonly double radialHeight;
+
+        public InfiniteWorldPosition(long chunkX, long chunkZ, double localX, double localZ, double radialHeight)
+        {
+            this.chunkX = chunkX;
+            this.chunkZ = chunkZ;
+            this.localX = localX;
+            this.localZ = localZ;
+            this.radialHeight = radialHeight;
+        }
+
+        public double LogicalX(double chunkSize) => chunkX * chunkSize + localX;
+        public double LogicalZ(double chunkSize) => chunkZ * chunkSize + localZ;
+        public bool Equals(InfiniteWorldPosition other) => chunkX == other.chunkX && chunkZ == other.chunkZ &&
+            localX.Equals(other.localX) && localZ.Equals(other.localZ) && radialHeight.Equals(other.radialHeight);
+        public override bool Equals(object obj) => obj is InfiniteWorldPosition other && Equals(other);
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = chunkX.GetHashCode();
+                hash = hash * 397 ^ chunkZ.GetHashCode();
+                hash = hash * 397 ^ localX.GetHashCode();
+                hash = hash * 397 ^ localZ.GetHashCode();
+                return hash * 397 ^ radialHeight.GetHashCode();
+            }
+        }
+    }
+
+    public readonly struct CurvedWorldFrameShift
+    {
+        public readonly Vector3 Pivot;
+        public readonly Quaternion Rotation;
+        public readonly Vector3 Translation;
+
+        public CurvedWorldFrameShift(Vector3 pivot, Quaternion rotation)
+        {
+            Pivot = pivot;
+            Rotation = rotation;
+            Translation = pivot - rotation * pivot;
+        }
+
+        public Vector3 TransformPoint(Vector3 point) => Rotation * point + Translation;
+        public Vector3 TransformDirection(Vector3 direction) => Rotation * direction;
+        public Vector3 RelocationDelta => Rotation == Quaternion.identity ? Translation : Vector3.zero;
     }
 
     [Serializable]

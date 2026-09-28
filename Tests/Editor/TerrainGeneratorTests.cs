@@ -12,6 +12,81 @@ namespace Humanier.Terrain.Tests
         [TearDown] public void TearDown() { Object.DestroyImmediate(settings); }
         [Test] public void SameSeedAndCoordinatesProduceSameSurface() => Assert.AreEqual(TerrainGenerator.SurfaceHeight(settings, 321.25f, -19.5f), TerrainGenerator.SurfaceHeight(settings, 321.25f, -19.5f));
         [Test]
+        public void SphericalCapAddsTheExpectedHeightAndStaysFiniteOutsideTheRadius()
+        {
+            const float radius = 100f;
+            settings.sphericalCapRadius = radius;
+            float flatCenter = TerrainGenerator.SurfaceHeight(settings, 0f, 0f);
+            float flatMiddle = TerrainGenerator.SurfaceHeight(settings, 50f, 0f);
+            settings.sphericalCapEnabled = true;
+
+            Assert.AreEqual(flatCenter, TerrainGenerator.SurfaceHeight(settings, 0f, 0f), .0001f);
+            Assert.AreEqual(flatMiddle + Mathf.Sqrt(radius * radius - 50f * 50f) - radius,
+                TerrainGenerator.SurfaceHeight(settings, 50f, 0f), .0001f);
+
+            settings.sphericalCapEnabled = false;
+            float flatOutside = TerrainGenerator.SurfaceHeight(settings, radius + 10f, 0f);
+            settings.sphericalCapEnabled = true;
+            float outside = TerrainGenerator.SurfaceHeight(settings, radius + 10f, 0f);
+            Assert.IsFalse(float.IsNaN(outside));
+            Assert.IsFalse(float.IsInfinity(outside));
+            Assert.AreEqual(flatOutside + .001f - radius, outside, .001f);
+        }
+        [Test]
+        public void SphericalCapStaticAndCachedGenerationShareSurfaceRangeAndSamples()
+        {
+            settings.sphericalCapEnabled = true;
+            settings.sphericalCapRadius = 96f;
+            var id = new TerrainChunkId(2, -1, -3);
+            TerrainSurfaceRange directRange = TerrainGenerator.SurfaceRange(settings, id);
+            var context = new TerrainGenerationContext(settings);
+            Assert.IsTrue(context.TryBuildSurfaceRange(id, 1000f, out TerrainSurfaceRange range));
+            var cached = new TerrainChunkData(settings, id, context, true);
+            TerrainChunkData staticGeneration = CreateReferenceChunk(id);
+
+            AssertChunkDataBitwiseEqual(staticGeneration, cached);
+            Assert.AreEqual(directRange.MinHeight, range.MinHeight);
+            Assert.AreEqual(directRange.MaxHeight, range.MaxHeight);
+            Assert.LessOrEqual(range.MinHeight, range.MaxHeight);
+            for (int z = 0; z <= settings.chunkResolution; z++)
+            for (int x = 0; x <= settings.chunkResolution; x++)
+            {
+                float worldX = (id.x * settings.chunkResolution + x) * settings.voxelSize;
+                float worldZ = (id.z * settings.chunkResolution + z) * settings.voxelSize;
+                float height = TerrainGenerator.SurfaceHeight(settings, worldX, worldZ);
+                Assert.That(height, Is.InRange(range.MinHeight - .0001f, range.MaxHeight + .0001f));
+            }
+        }
+        [Test]
+        public void SphericalCapSettingsArePartOfTheGenerationCacheKey()
+        {
+            var context = new TerrainGenerationContext(settings);
+            context.SurfaceRange(new TerrainChunkId(0, 0, 0));
+            settings.sphericalCapEnabled = true;
+            Assert.Throws<System.InvalidOperationException>(() => context.SurfaceRange(new TerrainChunkId(1, 0, 0)));
+
+            context = new TerrainGenerationContext(settings);
+            context.SurfaceRange(new TerrainChunkId(0, 0, 0));
+            settings.sphericalCapRadius += 10f;
+            Assert.Throws<System.InvalidOperationException>(() => context.SurfaceRange(new TerrainChunkId(1, 0, 0)));
+        }
+        [Test]
+        public void SphereCenterAndUpDirectionFollowWorldOriginOffset()
+        {
+            settings.sphericalCapEnabled = true;
+            settings.sphericalCapRadius = 100f;
+            var worldObject = new GameObject("Spherical terrain up direction");
+            TerrainWorld world = worldObject.AddComponent<TerrainWorld>();
+            SetField(world, "settings", settings);
+            Vector3 offset = new Vector3(120f, 30f, -40f);
+            world.SetOriginOffset(offset);
+
+            Assert.AreEqual(new Vector3(-120f, -130f, 40f), world.SphereCenter);
+            Assert.AreEqual(Vector3.up, world.SampleUpDirection(new Vector3(-120f, -30f, 40f)));
+            Assert.AreEqual(Vector3.right, world.SampleUpDirection(new Vector3(-20f, -130f, 40f)));
+            Object.DestroyImmediate(worldObject);
+        }
+        [Test]
         public void FacetSurfaceDetailIsDeterministicAndBounded()
         {
             settings.facetDetailAmplitude = .15f;
@@ -372,10 +447,11 @@ namespace Humanier.Terrain.Tests
         public void CorruptSessionCacheReportsAnError()
         {
             string session = System.Guid.NewGuid().ToString("N");
-            string directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain", settings.seed.ToString(), session);
+            var cache = new TerrainSessionCache(settings.seed, session);
+            string directory = (string)typeof(TerrainSessionCache)
+                .GetField("directory", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(cache);
             Directory.CreateDirectory(directory);
             File.WriteAllText(Path.Combine(directory, "0_0_0.bin"), "not a gzip terrain cache");
-            var cache = new TerrainSessionCache(settings.seed, session);
             Assert.IsFalse(cache.TryLoad(new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0))));
             Assert.IsNotEmpty(cache.LastError);
         }
@@ -383,10 +459,11 @@ namespace Humanier.Terrain.Tests
         public void DiscardingAnInvalidSessionCacheAllowsGenerationToContinue()
         {
             string session = System.Guid.NewGuid().ToString("N");
-            string directory = Path.Combine(Application.temporaryCachePath, "HumanierTerrain", settings.seed.ToString(), session);
+            var cache = new TerrainSessionCache(settings.seed, session);
+            string directory = (string)typeof(TerrainSessionCache)
+                .GetField("directory", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(cache);
             Directory.CreateDirectory(directory);
             File.WriteAllText(Path.Combine(directory, "0_0_0.bin"), "not a gzip terrain cache");
-            var cache = new TerrainSessionCache(settings.seed, session);
             var data = new TerrainChunkData(settings, new TerrainChunkId(0, 0, 0));
 
             Assert.IsFalse(cache.TryLoad(data));
