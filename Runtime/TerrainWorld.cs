@@ -7,7 +7,7 @@ using Unity.Profiling;
 namespace Humanier.Terrain
 {
     [DisallowMultipleComponent]
-    public sealed class TerrainWorld : MonoBehaviour
+    public sealed partial class TerrainWorld : MonoBehaviour
     {
         private static readonly ProfilerMarker StreamingMarker = new ProfilerMarker("Terrain.StreamingPlan");
         private static readonly ProfilerMarker StreamingBudgetMarker = new ProfilerMarker("Terrain.StreamingPlan.SurfaceBudget");
@@ -119,8 +119,15 @@ namespace Humanier.Terrain
             public int meshRevision;
             public int pendingMeshRevision;
             public int appliedMeshRevision = -1;
+            public int appliedDataVersion = -1;
             public int pendingFrameRevision;
             public int appliedFrameRevision;
+            // Retaining an already resident LOD1 column schedules a collision
+            // LOD0 replacement. Until that replacement is applied, the old
+            // collider is still a valid physical surface and may be used by
+            // readiness probes. The revision guard prevents this exception
+            // from masking edits, origin shifts, or unrelated mesh rebuilds.
+            public int retainedLodUpgradeRevision = -1;
             // Mesh vertices for this chunk stay expressed in the projection frame
             // that existed when its root was created. The root receives later
             // rigid frame shifts, so rebuilt/late meshes must reuse this snapshot.
@@ -254,11 +261,33 @@ namespace Humanier.Terrain
             Vector3 logicalFocus = focus == null ? Vector3.zero : SceneToLogicalVector(focus.position);
             if (focus != null && !cacheWriteBlocked) UpdateStreamingPlan(logicalFocus);
             int buildCount = Settings.chunksBuiltPerFrame;
-            while (!cacheWriteBlocked && buildCount-- > 0 && requestedChunks.Count > 0)
+            ContinueRetainedRegionPlanning();
+            QueueRetainedRegionChunks();
+            while (!cacheWriteBlocked && buildCount-- > 0 && HasPendingChunkRequests())
             {
-                TerrainChunkId id = requestedChunks.Dequeue(); queuedChunks.Remove(id);
-                if (!chunks.ContainsKey(id) && !CreateChunk(id, logicalFocus, true))
+                TerrainChunkId id;
+                bool retainedRequest = retainedChunkRequests.Count > 0;
+                if (retainedRequest)
                 {
+                    id = retainedChunkRequests.Dequeue();
+                    retainedQueuedChunks.Remove(id);
+                    if (!IsRetainedChunk(id)) continue;
+                }
+                else
+                {
+                    id = requestedChunks.Dequeue(); queuedChunks.Remove(id);
+                }
+                if (!chunks.ContainsKey(id) && !CreateChunk(id, logicalFocus, retainedRequest ? false : true))
+                {
+                    if (retainedRequest)
+                    {
+                        RegisterRetainedRegionError($"Retained terrain chunk {id} could not be generated because the resident terrain budget is full or its cache is unavailable.");
+                        // RegisterRetainedRegionError clears the failed
+                        // retention queue. Do not retry it every frame ahead of
+                        // ordinary streaming; consumers can observe the public
+                        // error and dispose their lease.
+                        continue;
+                    }
                     QueueChunk(id);
                     break;
                 }
@@ -292,6 +321,7 @@ namespace Humanier.Terrain
             generation = null;
             if (generatedSettings != null) Destroy(generatedSettings);
             if (generatedMaterial != null) Destroy(generatedMaterial);
+            ClearRetainedRegions();
         }
 
         public void SetFocus(Transform value) => focus = value;
@@ -325,7 +355,8 @@ namespace Humanier.Terrain
             foreach (LoadedChunk chunk in chunks.Values)
             {
                 chunk.gameObject.transform.localPosition += compensation;
-                RebuildChunk(chunk);
+                chunk.retainedLodUpgradeRevision = -1;
+                RebuildChunk(chunk, false);
             }
             OriginOffsetChanged?.Invoke(compensation);
         }
@@ -511,7 +542,16 @@ namespace Humanier.Terrain
         public bool IsCollisionReady(Vector3 worldPosition)
         {
             TerrainChunkId id = WorldToChunk(SceneToLogicalVector(worldPosition));
-            return chunks.TryGetValue(id, out LoadedChunk chunk) && chunk.collider != null && chunk.appliedMeshRevision == chunk.meshRevision;
+            if (!chunks.TryGetValue(id, out LoadedChunk chunk) || chunk.collider == null)
+                return false;
+            // Preserve the original readiness contract: an applied empty mesh
+            // is still an applied chunk and is used by spawn probes around air
+            // or chunk boundaries. The fallback below is only for a retention
+            // LOD upgrade whose previous physical collider remains valid.
+            if (chunk.appliedMeshRevision == chunk.meshRevision) return true;
+            return chunk.retainedLodUpgradeRevision == chunk.meshRevision &&
+                chunk.collider.sharedMesh != null && chunk.collider.sharedMesh.vertexCount > 0 &&
+                chunk.appliedDataVersion == chunk.data.Version;
         }
 
         public bool TryRaycast(Ray ray, float maxDistance, out TerrainRaycastHit result, int layerMask = Physics.DefaultRaycastLayers)
@@ -709,7 +749,11 @@ namespace Humanier.Terrain
             {
                 foreach (ChunkEditPlan plan in plans)
                 {
-                    RebuildChunk(plan.chunk);
+                    // The existing collider no longer represents the edited
+                    // density. Do not let a pending retention LOD upgrade make
+                    // this data rebuild appear collision-ready.
+                    plan.chunk.retainedLodUpgradeRevision = -1;
+                    RebuildChunk(plan.chunk, false);
                     requiredMeshRevisions[plan.chunk.data.Id] = plan.chunk.meshRevision;
                     RefreshNeighbours(plan.chunk.data.Id);
                 }
@@ -1312,15 +1356,26 @@ namespace Humanier.Terrain
             RelaxLoadedLods();
             return true;
         }
-        private void RebuildChunk(LoadedChunk chunk)
+        private void RebuildChunk(LoadedChunk chunk, bool preserveRetainedCollision = true)
         {
             if (!chunk.isLoaded) return;
             MeshSignature desired = GetMeshSignature(chunk);
             if (chunk.hasDesiredMesh && chunk.desiredMesh.Equals(desired)) return;
+            bool canPreserveRetainedCollision = preserveRetainedCollision &&
+                (chunk.retainedLodUpgradeRevision == chunk.meshRevision ||
+                 IsRetainedColumn(new ColumnKey(chunk.data.Id.x, chunk.data.Id.z))) &&
+                chunk.collider != null && chunk.collider.sharedMesh != null &&
+                chunk.collider.sharedMesh.vertexCount > 0 && chunk.appliedDataVersion == chunk.data.Version;
             chunk.desiredMesh = desired;
             chunk.hasDesiredMesh = true;
             chunk.meshDirty = true;
             chunk.meshRevision++;
+            // Neighbor transition changes can rebuild a retained LOD0 chunk
+            // after ForceRetainedColumnLod recorded its pending revision. The
+            // old collider is still valid for the same density data, so carry
+            // the readiness exception to the new mesh revision.
+            if (canPreserveRetainedCollision)
+                chunk.retainedLodUpgradeRevision = chunk.meshRevision;
             QueueMeshBuild(chunk);
         }
         private void ApplyCompletedMeshes()
@@ -1386,7 +1441,9 @@ namespace Humanier.Terrain
             chunk.filter.sharedMesh = next;
             if (chunk.collider != null) chunk.collider.sharedMesh = next;
             chunk.appliedMeshRevision = appliedRevision;
+            chunk.appliedDataVersion = chunk.data.Version;
             chunk.appliedFrameRevision = meshFrameRevision;
+            chunk.retainedLodUpgradeRevision = -1;
             if (old != null) Destroy(old);
             ChunkMeshApplied?.Invoke(chunk.data.Id);
         }
@@ -1399,6 +1456,7 @@ namespace Humanier.Terrain
 
         private int GetLod(TerrainChunkId id)
         {
+            if (IsRetainedColumn(new ColumnKey(id.x, id.z))) return 0;
             if (focus == null) return Mathf.Clamp(Settings.minimumMeshLod, 0, 3);
             Vector3 point = new Vector3((float)((id.x + .5d) * Settings.ChunkSize), (id.y + .5f) * Settings.ChunkSize,
                 (float)((id.z + .5d) * Settings.ChunkSize));
@@ -1420,6 +1478,12 @@ namespace Humanier.Terrain
                 LoadedChunk chunk = pair.Value;
                 float cx = (float)((pair.Key.x + .5d) * Settings.ChunkSize), cz = (float)((pair.Key.z + .5d) * Settings.ChunkSize);
                 float distance = Vector2.Distance(new Vector2(cx, cz), new Vector2(globalFocus.x, globalFocus.z));
+                if (IsRetainedColumn(new ColumnKey(pair.Key.x, pair.Key.z)))
+                {
+                    if (chunk.lod != 0) { chunk.lod = 0; RebuildChunk(chunk); RefreshNeighbours(pair.Key); }
+                    chunk.lastAccessFrame = frameCounter;
+                    continue;
+                }
                 if (distance > unloadDistance)
                 {
                     if (IsEditStagingColumn(new ColumnKey(pair.Key.x, pair.Key.z))) continue;
@@ -1546,6 +1610,7 @@ namespace Humanier.Terrain
                 ColumnKey column = new ColumnKey(pair.Key.x, pair.Key.z);
                 if (excluded.IsValid && column.Equals(excluded)) continue;
                 if (IsEditStagingColumn(column)) continue;
+                if (IsRetainedColumn(column)) continue;
                 float distance = (ChunkCenter(pair.Key) - priorityCenter).sqrMagnitude;
                 if (distance <= furthestDistance) continue;
                 furthestDistance = distance;
